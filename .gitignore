@@ -1,0 +1,19 @@
+# Build output
+build/
+*.o
+*.skel.h
+vmlinux.h
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Raw experiment output
+experiments/results/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
