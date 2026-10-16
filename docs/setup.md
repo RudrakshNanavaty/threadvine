@@ -28,6 +28,22 @@ unless the exact-kernel tools package is missing: it depends on the latest
 kernel's tools, which pulls in a newer kernel image and a grub entry, and a
 reboot could then boot a kernel other than 6.8.0-54-generic.
 
+## Running the collector
+
+```
+make bpf
+make run              # sudo ./collector, no filter
+make run ARGS=<tgid>  # only switches involving that TGID
+```
+
+`make run` copies the binary to `/tmp/ebpf-collector-<user>/` first. If the
+repo lives on an NFS home directory with Kerberos, root cannot read it, so
+`sudo ./build/collector` fails with `Permission denied`.
+
+Optional tools for the verification checks: `bpftrace` and `stress-ng`
+(`sudo apt install stress-ng`). Send collector stdout to `/dev/null` when
+comparing rates; printing every event to a terminal slows the machine.
+
 ## Doctor checks
 
 | Check | Command | If it fails |
