@@ -7,8 +7,11 @@ BPFTOOL ?= bpftool
 
 all: bench bpf
 
-bench:
-	@echo "bench: not implemented yet"
+bench: build/pipeline
+
+build/pipeline: bench/pipeline.c
+	mkdir -p build
+	$(CC) -g -O2 -Wall -Wextra -pthread $< -o $@
 
 bpf: build/collector
 
