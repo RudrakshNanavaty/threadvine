@@ -12,6 +12,10 @@ __pycache__/
 # Raw experiment output
 experiments/results/
 
+# Benchmark ground-truth output (written to the directory you run it from)
+*.handoffs.csv
+*.threads.csv
+
 # Editors / OS
 .vscode/
 .idea/
