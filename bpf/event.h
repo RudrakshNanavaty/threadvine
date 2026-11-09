@@ -7,7 +7,8 @@
 
 enum event_type {
     EV_SCHED_SWITCH = 1,
-    /* EV_SCHED_WAKEUP, EV_FUTEX_ENTER, EV_FUTEX_EXIT, EV_PIPE_IO: not yet defined */
+    EV_SCHED_WAKING = 2,
+    /* EV_FUTEX, EV_IO, EV_COMM: not yet defined */
 };
 
 struct event {
@@ -22,7 +23,10 @@ struct event {
             __u32 next_tid;
             __u64 prev_state;
         } sched_switch;
-        /* other event payloads get added here */
+        struct {
+            __u32 wakee_tid;    /* tid/tgid above are the waker */
+            __u32 wakee_tgid;
+        } waking;
     };
 };
 

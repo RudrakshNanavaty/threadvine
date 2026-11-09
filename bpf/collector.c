@@ -50,13 +50,21 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
     char buf[24];
 
     (void)ctx;
-    if (data_sz != sizeof(*e) || e->type != EV_SCHED_SWITCH)
+    if (data_sz != sizeof(*e))
         return 0;
 
     events++;
-    printf("%llu cpu=%u %u->%u %s\n", (unsigned long long)e->ts_ns, e->cpu,
-           e->sched_switch.prev_tid, e->sched_switch.next_tid,
-           state_str(e->sched_switch.prev_state, buf, sizeof(buf)));
+    switch (e->type) {
+    case EV_SCHED_SWITCH:
+        printf("%llu cpu=%u switch %u->%u %s\n", (unsigned long long)e->ts_ns, e->cpu,
+               e->sched_switch.prev_tid, e->sched_switch.next_tid,
+               state_str(e->sched_switch.prev_state, buf, sizeof(buf)));
+        break;
+    case EV_SCHED_WAKING:
+        printf("%llu cpu=%u waking %u->%u tgid=%u\n", (unsigned long long)e->ts_ns, e->cpu,
+               e->tid, e->waking.wakee_tid, e->waking.wakee_tgid);
+        break;
+    }
     return 0;
 }
 
