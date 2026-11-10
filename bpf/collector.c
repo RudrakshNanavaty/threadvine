@@ -1,4 +1,5 @@
-// sched_switch collector loader: prints one line per context switch.
+// sched_switch collector loader: writes one JSON object per event
+// (JSON lines) to stdout; see docs/event-format.md.
 //
 // Usage: collector [target_tgid]   (0 or omitted: no filter)
 #include <errno.h>
@@ -12,7 +13,8 @@
 #include "collector.skel.h"
 
 static volatile sig_atomic_t stop;
-static unsigned long long events;
+static unsigned long long recorded_event_count;
+static unsigned long long last_timestamp_nanoseconds;
 
 static void on_signal(int sig)
 {
@@ -27,49 +29,45 @@ static int libbpf_print(enum libbpf_print_level level, const char *fmt, va_list 
     return vfprintf(stderr, fmt, args);
 }
 
-/* Short letter for the common task states; raw value otherwise. */
-static const char *state_str(__u64 state, char *buf, size_t len)
-{
-    switch (state) {
-    case 0x00: return "R";
-    case 0x01: return "S";
-    case 0x02: return "D";
-    case 0x04: return "T";
-    case 0x08: return "t";
-    case 0x10: return "X";
-    case 0x20: return "Z";
-    default:
-        snprintf(buf, len, "0x%llx", (unsigned long long)state);
-        return buf;
-    }
-}
-
 static int handle_event(void *ctx, void *data, size_t data_sz)
 {
     const struct event *received_event = data;
-    char buf[24];
 
     (void)ctx;
     if (data_sz != sizeof(*received_event))
         return 0;
 
-    events++;
+    recorded_event_count++;
+    last_timestamp_nanoseconds = received_event->timestamp_nanoseconds;
     switch (received_event->event_type) {
     case EVENT_TYPE_SCHEDULER_SWITCH:
-        printf("%llu cpu=%u switch %u->%u %s\n",
-               (unsigned long long)received_event->timestamp_nanoseconds,
-               received_event->cpu_index,
-               received_event->scheduler_switch.previous_thread_identifier,
-               received_event->scheduler_switch.next_thread_identifier,
-               state_str(received_event->scheduler_switch.previous_thread_state, buf,
-                         sizeof(buf)));
-        break;
-    case EVENT_TYPE_SCHEDULER_WAKING:
-        printf("%llu cpu=%u waking %u->%u tgid=%u\n",
+        printf("{\"timestamp_nanoseconds\": %llu, \"event_type\": "
+               "\"EVENT_TYPE_SCHEDULER_SWITCH\", \"cpu_index\": %u, "
+               "\"thread_identifier\": %u, \"process_identifier\": %u, "
+               "\"scheduler_switch\": {\"previous_thread_identifier\": %u, "
+               "\"next_thread_identifier\": %u, \"previous_thread_state\": %llu}}\n",
                (unsigned long long)received_event->timestamp_nanoseconds,
                received_event->cpu_index, received_event->thread_identifier,
+               received_event->process_identifier,
+               received_event->scheduler_switch.previous_thread_identifier,
+               received_event->scheduler_switch.next_thread_identifier,
+               (unsigned long long)received_event->scheduler_switch.previous_thread_state);
+        break;
+    case EVENT_TYPE_SCHEDULER_WAKING:
+        printf("{\"timestamp_nanoseconds\": %llu, \"event_type\": "
+               "\"EVENT_TYPE_SCHEDULER_WAKING\", \"cpu_index\": %u, "
+               "\"thread_identifier\": %u, \"process_identifier\": %u, "
+               "\"scheduler_waking\": {\"woken_thread_identifier\": %u, "
+               "\"woken_process_identifier\": %u}}\n",
+               (unsigned long long)received_event->timestamp_nanoseconds,
+               received_event->cpu_index, received_event->thread_identifier,
+               received_event->process_identifier,
                received_event->scheduler_waking.woken_thread_identifier,
                received_event->scheduler_waking.woken_process_identifier);
+        break;
+    default:
+        /* Not emitted by the BPF program today; do not count or print it. */
+        recorded_event_count--;
         break;
     }
     return 0;
@@ -144,9 +142,17 @@ out:
     if (rb && ret == 0) {
         collector_bpf__detach(skel);
         ring_buffer__consume(rb);
+        unsigned long long dropped_event_count = skel->bss->dropped;
+
+        printf("{\"timestamp_nanoseconds\": %llu, \"event_type\": "
+               "\"EVENT_TYPE_END_OF_TRACE\", \"cpu_index\": 0, "
+               "\"thread_identifier\": 0, \"process_identifier\": 0, "
+               "\"end_of_trace\": {\"recorded_event_count\": %llu, "
+               "\"dropped_event_count\": %llu}}\n",
+               last_timestamp_nanoseconds, recorded_event_count, dropped_event_count);
         fflush(stdout);
-        fprintf(stderr, "events: %llu dropped: %llu\n", events,
-                (unsigned long long)skel->bss->dropped);
+        fprintf(stderr, "events: %llu dropped: %llu\n", recorded_event_count,
+                dropped_event_count);
     }
     ring_buffer__free(rb);
     collector_bpf__destroy(skel);

@@ -98,7 +98,8 @@ analysis.
 - A `BPF_MAP_TYPE_RINGBUF` named `rb`, 256 KiB, one `struct event` per record.
 - The program reserves a record and zeroes it; if reservation fails the event
   is lost and the global `dropped` counter (`.bss`) is incremented atomically.
-- The loader prints `events: N dropped: M` to stderr on exit.
+- The loader writes one JSON object per event to stdout (see below) and prints
+  `events: N dropped: M` to stderr on exit.
 - Filtering happens in the kernel: `target_tgid` (rodata, `0` = no filter)
   keeps only events where the actor or the other thread involved (next thread
   on a switch, woken thread on a wakeup) belongs to that process. The
@@ -106,6 +107,25 @@ analysis.
   the ring buffer wakes the collector and would otherwise feed back into
   the event stream.
 
-TODO: serialization to disk. The proposed file is a small fixed header (magic,
-version, record size, clock, target process, start timestamp), then raw
-`struct event` records, ending with an `EVENT_TYPE_END_OF_TRACE` record.
+## On-disk format: JSON lines
+
+The collector writes one JSON object per line to stdout and nothing else
+there; diagnostics go to stderr. The analyzer reads only this format. Example:
+
+```
+{"timestamp_nanoseconds": 1000000000000, "event_type": "EVENT_TYPE_SCHEDULER_WAKING", "cpu_index": 0, "thread_identifier": 0, "process_identifier": 0, "scheduler_waking": {"woken_thread_identifier": 1001, "woken_process_identifier": 1000}}
+```
+
+- `event_type` is the full enum name as a string. The payload is an object
+  named after the union member in `bpf/event.h`. `reserved` fields are omitted.
+  `previous_thread_state` is the raw number.
+- Only scheduler switch and scheduler waking events are emitted today.
+- On a clean exit (after detaching and the final drain of the ring buffer) the
+  last line is one `EVENT_TYPE_END_OF_TRACE` record. Its
+  `recorded_event_count` excludes the end record itself, and
+  `dropped_event_count` is the `dropped` counter. Its `timestamp_nanoseconds`
+  is that of the last received event; the other header fields are 0. A trace
+  without this line was cut short.
+- There is no output-path option. Capture with a shell redirect, for example
+  `make -s run ARGS=<tgid> > trace.jsonl`, or run the binary directly. Plain
+  `make run` echoes recipe lines into stdout and would corrupt the file.
