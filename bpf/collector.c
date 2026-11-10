@@ -46,23 +46,30 @@ static const char *state_str(__u64 state, char *buf, size_t len)
 
 static int handle_event(void *ctx, void *data, size_t data_sz)
 {
-    const struct event *e = data;
+    const struct event *received_event = data;
     char buf[24];
 
     (void)ctx;
-    if (data_sz != sizeof(*e))
+    if (data_sz != sizeof(*received_event))
         return 0;
 
     events++;
-    switch (e->type) {
-    case EV_SCHED_SWITCH:
-        printf("%llu cpu=%u switch %u->%u %s\n", (unsigned long long)e->ts_ns, e->cpu,
-               e->sched_switch.prev_tid, e->sched_switch.next_tid,
-               state_str(e->sched_switch.prev_state, buf, sizeof(buf)));
+    switch (received_event->event_type) {
+    case EVENT_TYPE_SCHEDULER_SWITCH:
+        printf("%llu cpu=%u switch %u->%u %s\n",
+               (unsigned long long)received_event->timestamp_nanoseconds,
+               received_event->cpu_index,
+               received_event->scheduler_switch.previous_thread_identifier,
+               received_event->scheduler_switch.next_thread_identifier,
+               state_str(received_event->scheduler_switch.previous_thread_state, buf,
+                         sizeof(buf)));
         break;
-    case EV_SCHED_WAKING:
-        printf("%llu cpu=%u waking %u->%u tgid=%u\n", (unsigned long long)e->ts_ns, e->cpu,
-               e->tid, e->waking.wakee_tid, e->waking.wakee_tgid);
+    case EVENT_TYPE_SCHEDULER_WAKING:
+        printf("%llu cpu=%u waking %u->%u tgid=%u\n",
+               (unsigned long long)received_event->timestamp_nanoseconds,
+               received_event->cpu_index, received_event->thread_identifier,
+               received_event->scheduler_waking.woken_thread_identifier,
+               received_event->scheduler_waking.woken_process_identifier);
         break;
     }
     return 0;

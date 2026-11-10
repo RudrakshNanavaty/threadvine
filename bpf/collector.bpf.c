@@ -27,7 +27,7 @@ SEC("tp_btf/sched_switch")
 int BPF_PROG(handle_switch, bool preempt, struct task_struct *prev,
              struct task_struct *next, unsigned int prev_state)
 {
-    struct event *e;
+    struct event *recorded_event;
 
     if (self_tgid && (prev->tgid == self_tgid || next->tgid == self_tgid))
         return 0;
@@ -35,30 +35,34 @@ int BPF_PROG(handle_switch, bool preempt, struct task_struct *prev,
     if (target_tgid && prev->tgid != target_tgid && next->tgid != target_tgid)
         return 0;
 
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e) {
+    recorded_event = bpf_ringbuf_reserve(&rb, sizeof(*recorded_event), 0);
+    if (!recorded_event) {
         __sync_fetch_and_add(&dropped, 1);
         return 0;
     }
 
-    e->ts_ns = bpf_ktime_get_ns();
-    e->type = EV_SCHED_SWITCH;
-    e->cpu = bpf_get_smp_processor_id();
-    /* At sched_switch the current task is prev. */
-    e->tid = prev->pid;
-    e->tgid = prev->tgid;
-    e->sched_switch.prev_tid = prev->pid;
-    e->sched_switch.next_tid = next->pid;
-    e->sched_switch.prev_state = prev_state;
+    /* Reserved ring buffer memory is not zeroed; clear it so unused payload
+     * bytes never carry stale kernel data into the event stream. */
+    __builtin_memset(recorded_event, 0, sizeof(*recorded_event));
 
-    bpf_ringbuf_submit(e, 0);
+    recorded_event->timestamp_nanoseconds = bpf_ktime_get_ns();
+    recorded_event->event_type = EVENT_TYPE_SCHEDULER_SWITCH;
+    recorded_event->cpu_index = bpf_get_smp_processor_id();
+    /* At sched_switch the current task is prev. */
+    recorded_event->thread_identifier = prev->pid;
+    recorded_event->process_identifier = prev->tgid;
+    recorded_event->scheduler_switch.previous_thread_identifier = prev->pid;
+    recorded_event->scheduler_switch.next_thread_identifier = next->pid;
+    recorded_event->scheduler_switch.previous_thread_state = prev_state;
+
+    bpf_ringbuf_submit(recorded_event, 0);
     return 0;
 }
 
 SEC("tp_btf/sched_waking")
 int BPF_PROG(handle_waking, struct task_struct *p)
 {
-    struct event *e;
+    struct event *recorded_event;
     __u64 id = bpf_get_current_pid_tgid();
     __u32 waker_tgid = id >> 32;
 
@@ -68,21 +72,24 @@ int BPF_PROG(handle_waking, struct task_struct *p)
     if (target_tgid && waker_tgid != target_tgid && p->tgid != target_tgid)
         return 0;
 
-    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e) {
+    recorded_event = bpf_ringbuf_reserve(&rb, sizeof(*recorded_event), 0);
+    if (!recorded_event) {
         __sync_fetch_and_add(&dropped, 1);
         return 0;
     }
 
-    e->ts_ns = bpf_ktime_get_ns();
-    e->type = EV_SCHED_WAKING;
-    e->cpu = bpf_get_smp_processor_id();
-    /* sched_waking runs in the waker's context, so the current task is the waker. */
-    e->tid = (__u32)id;
-    e->tgid = waker_tgid;
-    e->waking.wakee_tid = p->pid;
-    e->waking.wakee_tgid = p->tgid;
+    /* See handle_switch: clear unused payload bytes. */
+    __builtin_memset(recorded_event, 0, sizeof(*recorded_event));
 
-    bpf_ringbuf_submit(e, 0);
+    recorded_event->timestamp_nanoseconds = bpf_ktime_get_ns();
+    recorded_event->event_type = EVENT_TYPE_SCHEDULER_WAKING;
+    recorded_event->cpu_index = bpf_get_smp_processor_id();
+    /* sched_waking runs in the waker's context, so the current task is the waker. */
+    recorded_event->thread_identifier = (__u32)id;
+    recorded_event->process_identifier = waker_tgid;
+    recorded_event->scheduler_waking.woken_thread_identifier = p->pid;
+    recorded_event->scheduler_waking.woken_process_identifier = p->tgid;
+
+    bpf_ringbuf_submit(recorded_event, 0);
     return 0;
 }
