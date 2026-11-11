@@ -1,10 +1,21 @@
-// sched_switch collector loader: prints one line per context switch.
+// Collector loader: streams sched_switch and sched_waking events.
 //
-// Usage: collector [target_tgid]   (0 or omitted: no filter)
+// Usage: collector [--output FILE] [target_tgid]
+//   target_tgid    only events involving this process (0 or omitted: no filter).
+//                  tgid is the kernel's name for a process identifier.
+//                  With a target, the collector exits on its own when the target exits.
+//   --output FILE  (short form -o) write the binary trace file (docs/event-format.md)
+//                  instead of text lines on stdout.
+#define _GNU_SOURCE
 #include <errno.h>
+#include <getopt.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 #include <linux/types.h>
 #include <bpf/libbpf.h>
@@ -12,7 +23,9 @@
 #include "collector.skel.h"
 
 static volatile sig_atomic_t stop;
-static unsigned long long events;
+static unsigned long long recorded_event_count;
+static __u64 last_timestamp_nanoseconds;
+static FILE *output_file;       /* binary trace file, or NULL for text on stdout */
 
 static void on_signal(int sig)
 {
@@ -53,7 +66,11 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
     if (data_sz != sizeof(*received_event))
         return 0;
 
-    events++;
+    recorded_event_count++;
+    last_timestamp_nanoseconds = received_event->timestamp_nanoseconds;
+    if (output_file)
+        return fwrite(received_event, sizeof(*received_event), 1, output_file) == 1 ? 0 : -EIO;
+
     switch (received_event->event_type) {
     case EVENT_TYPE_SCHEDULER_SWITCH:
         printf("%llu cpu=%u switch %u->%u %s\n",
@@ -75,26 +92,92 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
     return 0;
 }
 
+/* Called just before attaching, so the start timestamp precedes every event. */
+static int write_file_header(__u32 target_process_identifier)
+{
+    struct event_file_header file_header = {
+        .format_version = EVENT_FILE_FORMAT_VERSION,
+        .record_size_bytes = sizeof(struct event),
+        .clock_identifier = CLOCK_MONOTONIC,
+        .target_process_identifier = target_process_identifier,
+    };
+    struct timespec now;
+
+    memcpy(file_header.magic, EVENT_FILE_MAGIC, sizeof(file_header.magic));
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    file_header.start_timestamp_nanoseconds =
+        (__u64)now.tv_sec * 1000000000ULL + (__u64)now.tv_nsec;
+    return fwrite(&file_header, sizeof(file_header), 1, output_file) == 1 ? 0 : -1;
+}
+
+/* The last record: a trace without it was cut short. */
+static int write_end_of_trace(unsigned long long dropped_event_count)
+{
+    struct event end_record = {
+        .timestamp_nanoseconds = last_timestamp_nanoseconds,
+        .event_type = EVENT_TYPE_END_OF_TRACE,
+    };
+
+    end_record.end_of_trace.recorded_event_count = recorded_event_count;
+    end_record.end_of_trace.dropped_event_count = dropped_event_count;
+    return fwrite(&end_record, sizeof(end_record), 1, output_file) == 1 ? 0 : -1;
+}
+
+static int usage(const char *program)
+{
+    fprintf(stderr, "usage: %s [--output FILE] [target_tgid]\n", program);
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
-    struct collector_bpf *skel;
+    struct collector_bpf *skel = NULL;
     struct ring_buffer *rb = NULL;
+    const char *output_path = NULL;
     unsigned long target = 0;
-    int err, ret = 1;
+    int target_process_file_descriptor = -1;
+    int option_character, err, ret = 1;
+    static const struct option long_options[] = {
+        { "output", required_argument, NULL, 'o' },
+        { NULL, 0, NULL, 0 },
+    };
 
-    if (argc > 2) {
-        fprintf(stderr, "usage: %s [target_tgid]\n", argv[0]);
-        return 1;
+    while ((option_character = getopt_long(argc, argv, "o:", long_options, NULL)) != -1) {
+        if (option_character != 'o')
+            return usage(argv[0]);
+        output_path = optarg;
     }
-    if (argc == 2) {
+    if (argc - optind > 1)
+        return usage(argv[0]);
+    if (argc - optind == 1) {
+        const char *argument = argv[optind];
         char *end;
 
         errno = 0;
-        target = strtoul(argv[1], &end, 10);
-        if (errno || *end || end == argv[1] || target > 0xffffffffUL) {
-            fprintf(stderr, "invalid tgid: %s\n", argv[1]);
+        target = strtoul(argument, &end, 10);
+        if (errno || *end || end == argument || target > 0xffffffffUL) {
+            fprintf(stderr, "invalid tgid: %s\n", argument);
             return 1;
         }
+    }
+
+    /* A pidfd is a file descriptor that refers to a process. It becomes readable
+     * when that process exits, so the collector can stop on its own and still
+     * write the end-of-trace record. */
+    if (target) {
+        target_process_file_descriptor = syscall(SYS_pidfd_open, (pid_t)target, 0);
+        if (target_process_file_descriptor < 0) {
+            fprintf(stderr, "cannot watch process %lu: %s\n", target, strerror(errno));
+            return 1;
+        }
+    }
+    if (output_path) {
+        output_file = fopen(output_path, "wb");
+        if (!output_file) {
+            fprintf(stderr, "cannot open %s: %s\n", output_path, strerror(errno));
+            goto out;
+        }
+        setvbuf(output_file, NULL, _IOFBF, 1 << 20);   /* write to disk in 1 MiB chunks */
     }
 
     libbpf_set_print(libbpf_print);
@@ -104,7 +187,7 @@ int main(int argc, char **argv)
     skel = collector_bpf__open();
     if (!skel) {
         fprintf(stderr, "failed to open BPF skeleton\n");
-        return 1;
+        goto out;
     }
     /* rodata is frozen at load, so set the filter first. */
     skel->rodata->target_tgid = (__u32)target;
@@ -122,6 +205,11 @@ int main(int argc, char **argv)
         goto out;
     }
 
+    if (output_file && write_file_header((__u32)target) != 0) {
+        fprintf(stderr, "cannot write %s: %s\n", output_path, strerror(errno));
+        goto out;
+    }
+
     err = collector_bpf__attach(skel);
     if (err) {
         fprintf(stderr, "failed to attach: %d\n", err);
@@ -133,8 +221,14 @@ int main(int argc, char **argv)
         if (err == -EINTR)
             break;
         if (err < 0) {
-            fprintf(stderr, "ring buffer poll failed: %d\n", err);
+            fprintf(stderr, "ring buffer poll failed: %s\n", strerror(-err));
             goto out;
+        }
+        if (target_process_file_descriptor >= 0) {
+            struct pollfd target_exit_poll = { .fd = target_process_file_descriptor, .events = POLLIN };
+
+            if (poll(&target_exit_poll, 1, 0) > 0)
+                break;  /* target exited */
         }
     }
     ret = 0;
@@ -142,12 +236,27 @@ int main(int argc, char **argv)
 out:
     /* Detach first so the counters are final, then drain what is left. */
     if (rb && ret == 0) {
+        unsigned long long dropped_event_count;
+
         collector_bpf__detach(skel);
         ring_buffer__consume(rb);
+        dropped_event_count = skel->bss->dropped;
+        if (output_file && write_end_of_trace(dropped_event_count) != 0)
+            ret = 1;
         fflush(stdout);
-        fprintf(stderr, "events: %llu dropped: %llu\n", events,
-                (unsigned long long)skel->bss->dropped);
+        fprintf(stderr, "events: %llu dropped: %llu\n", recorded_event_count,
+                dropped_event_count);
     }
+    if (output_file) {
+        if (fclose(output_file) != 0)
+            ret = 1;
+        if (ret == 0)
+            fprintf(stderr, "wrote %s\n", output_path);
+        else
+            fprintf(stderr, "%s is incomplete\n", output_path);
+    }
+    if (target_process_file_descriptor >= 0)
+        close(target_process_file_descriptor);
     ring_buffer__free(rb);
     collector_bpf__destroy(skel);
     return ret;

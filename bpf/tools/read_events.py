@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Read a collector trace as dictionaries.
+
+read_events(path) yields one dictionary per event, with the field names from
+docs/event-format.md, for example:
+    {"timestamp_nanoseconds": ..., "event_type": "EVENT_TYPE_SCHEDULER_WAKING",
+     "cpu_index": ..., "thread_identifier": ..., "process_identifier": ...,
+     "scheduler_waking": {"woken_thread_identifier": ..., "woken_process_identifier": ...}}
+Reserved fields are left out. It reads the binary file written by
+`collector --output FILE`, or a .jsonl file with one such dictionary per line
+(handy for hand-written analyzer tests).
+
+Summary of a trace:  python3 bpf/tools/read_events.py run.events.bin
+"""
+import collections
+import json
+import struct
+import sys
+
+FILE_MAGIC = b'TRPF'
+# magic, format_version, record_size_bytes, clock_identifier, target_process_identifier,
+# reserved, start_timestamp_nanoseconds
+FILE_HEADER = struct.Struct('<4sIIIIIQ')
+# timestamp_nanoseconds, event_type, cpu_index, thread_identifier, process_identifier
+EVENT_HEADER = struct.Struct('<QIIII')
+
+PIPE_OR_SOCKET_FIELDS = ('inode_number', 'file_descriptor', 'byte_count_or_negative_error')
+# event_type value: (name, payload member, payload struct format, payload field names)
+EVENT_TYPES = {
+    1: ('EVENT_TYPE_SCHEDULER_SWITCH', 'scheduler_switch', '<IIQ',
+        ('previous_thread_identifier', 'next_thread_identifier', 'previous_thread_state')),
+    2: ('EVENT_TYPE_SCHEDULER_WAKING', 'scheduler_waking', '<II',
+        ('woken_thread_identifier', 'woken_process_identifier')),
+    3: ('EVENT_TYPE_FUTEX_ENTER', 'futex_enter', '<QI', ('futex_address', 'futex_operation')),
+    4: ('EVENT_TYPE_FUTEX_EXIT', 'futex_exit', '<q', ('return_value',)),
+    5: ('EVENT_TYPE_PIPE_OR_SOCKET_READ', 'pipe_or_socket', '<Qii', PIPE_OR_SOCKET_FIELDS),
+    6: ('EVENT_TYPE_PIPE_OR_SOCKET_WRITE', 'pipe_or_socket', '<Qii', PIPE_OR_SOCKET_FIELDS),
+    7: ('EVENT_TYPE_THREAD_NAME', 'thread_name', None, None),
+    0xFFFF: ('EVENT_TYPE_END_OF_TRACE', 'end_of_trace', '<QQ',
+             ('recorded_event_count', 'dropped_event_count')),
+}
+
+
+def is_binary_trace(path):
+    """True for a file written by collector --output, False for anything else (.jsonl)."""
+    with open(path, 'rb') as trace_file:
+        return trace_file.read(len(FILE_MAGIC)) == FILE_MAGIC
+
+
+def read_file_header(path):
+    """Return the binary file's header as a dictionary."""
+    with open(path, 'rb') as trace_file:
+        raw_header = trace_file.read(FILE_HEADER.size)
+    if len(raw_header) < FILE_HEADER.size or raw_header[:4] != FILE_MAGIC:
+        raise ValueError(f'{path}: not a collector trace file')
+    (_, format_version, record_size_bytes, clock_identifier, target_process_identifier,
+     _, start_timestamp_nanoseconds) = FILE_HEADER.unpack(raw_header)
+    return {
+        'format_version': format_version,
+        'record_size_bytes': record_size_bytes,
+        'clock_identifier': clock_identifier,
+        'target_process_identifier': target_process_identifier,
+        'start_timestamp_nanoseconds': start_timestamp_nanoseconds,
+    }
+
+
+def _decode_record(record):
+    (timestamp_nanoseconds, event_type, cpu_index, thread_identifier,
+     process_identifier) = EVENT_HEADER.unpack_from(record)
+    event = {
+        'timestamp_nanoseconds': timestamp_nanoseconds,
+        'event_type': event_type,
+        'cpu_index': cpu_index,
+        'thread_identifier': thread_identifier,
+        'process_identifier': process_identifier,
+    }
+    known_type = EVENT_TYPES.get(event_type)
+    if known_type is None:
+        return event                    # unknown type: keep the number, no payload
+    name, payload_member, payload_format, field_names = known_type
+    payload = record[EVENT_HEADER.size:]
+    event['event_type'] = name
+    if payload_format is None:          # thread name: NUL-terminated char[16]
+        thread_name = payload[:16].split(b'\0', 1)[0].decode(errors='replace')
+        event[payload_member] = {'thread_name': thread_name}
+    else:
+        event[payload_member] = dict(zip(field_names, struct.unpack_from(payload_format, payload)))
+    return event
+
+
+def read_events(path):
+    """Yield every event in a binary trace file or a .jsonl file, in file order."""
+    if not is_binary_trace(path):
+        with open(path) as jsonl_file:
+            for line in jsonl_file:
+                if line.strip():
+                    yield json.loads(line)
+        return
+
+    record_size_bytes = read_file_header(path)['record_size_bytes']
+    with open(path, 'rb') as trace_file:
+        trace_file.seek(FILE_HEADER.size)
+        while record := trace_file.read(record_size_bytes):
+            if len(record) < record_size_bytes:
+                raise ValueError(f'{path}: truncated record at end of file')
+            yield _decode_record(record)
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit(f'usage: {sys.argv[0]} TRACE_FILE')
+    path = sys.argv[1]
+    event_type_counts = collections.Counter()
+    wakeup_pair_counts = collections.Counter()
+    end_of_trace = None
+    for event in read_events(path):
+        event_type_counts[event['event_type']] += 1
+        if event['event_type'] == 'EVENT_TYPE_SCHEDULER_WAKING':
+            woken = event['scheduler_waking']['woken_thread_identifier']
+            wakeup_pair_counts[(event['thread_identifier'], woken)] += 1
+        elif event['event_type'] == 'EVENT_TYPE_END_OF_TRACE':
+            end_of_trace = event['end_of_trace']
+
+    if is_binary_trace(path):
+        print(read_file_header(path))
+    for name, count in event_type_counts.most_common():
+        print(f'{count:>10}  {name}')
+    print(end_of_trace if end_of_trace else 'WARNING: no END_OF_TRACE record, trace was cut short')
+    print('top wakeups (waker -> woken):')
+    for (waker, woken), count in wakeup_pair_counts.most_common(5):
+        print(f'{count:>10}  {waker} -> {woken}')
+
+
+if __name__ == '__main__':
+    main()

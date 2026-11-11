@@ -8,7 +8,7 @@ char LICENSE[] SEC("license") = "GPL";
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 256 * 1024);
+    __uint(max_entries, 16 * 1024 * 1024);  /* 16 MiB: room for bursts while userspace writes */
 } rb SEC(".maps");
 
 /* Set from userspace before load. 0 means no filter. */

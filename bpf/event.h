@@ -17,6 +17,7 @@ enum event_type {
     EVENT_TYPE_PIPE_OR_SOCKET_READ = 5,
     EVENT_TYPE_PIPE_OR_SOCKET_WRITE = 6,
     EVENT_TYPE_THREAD_NAME = 7,
+    /* Written by userspace as the last record of an --output file: */
     EVENT_TYPE_END_OF_TRACE = 0xFFFF,
 };
 
@@ -62,5 +63,23 @@ struct event {
 };
 
 _Static_assert(sizeof(struct event) == 40, "struct event layout changed");
+
+/* collector --output FILE writes one event_file_header, then struct event records back
+ * to back, ending with one EVENT_TYPE_END_OF_TRACE record. Native endianness.
+ */
+#define EVENT_FILE_MAGIC "TRPF"
+#define EVENT_FILE_FORMAT_VERSION 1
+
+struct event_file_header {
+    char  magic[4];                     /* EVENT_FILE_MAGIC, no terminator */
+    __u32 format_version;               /* EVENT_FILE_FORMAT_VERSION */
+    __u32 record_size_bytes;            /* sizeof(struct event) */
+    __u32 clock_identifier;             /* 1 = CLOCK_MONOTONIC, the clock of bpf_ktime_get_ns() */
+    __u32 target_process_identifier;    /* traced process, 0 = no filter */
+    __u32 reserved;
+    __u64 start_timestamp_nanoseconds;  /* CLOCK_MONOTONIC just before tracing started */
+};
+
+_Static_assert(sizeof(struct event_file_header) == 32, "file header layout changed");
 
 #endif

@@ -21,3 +21,6 @@ experiments/results/
 .idea/
 *.swp
 .DS_Store
+
+# Collector output
+*.events.bin

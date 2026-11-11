@@ -41,7 +41,7 @@ the waker, the thread calling futex, the reader or writer, and so on.
 | 5 | `EVENT_TYPE_PIPE_OR_SOCKET_READ` | `pipe_or_socket` | `inode_number` (`u64`), `file_descriptor` (`s32`), `byte_count_or_negative_error` (`s32`) | not yet |
 | 6 | `EVENT_TYPE_PIPE_OR_SOCKET_WRITE` | `pipe_or_socket` | same as read | not yet |
 | 7 | `EVENT_TYPE_THREAD_NAME` | `thread_name` | `thread_name` (`char[16]`) | not yet |
-| 0xFFFF | `EVENT_TYPE_END_OF_TRACE` | `end_of_trace` | `recorded_event_count` (`u64`), `dropped_event_count` (`u64`) | not yet |
+| 0xFFFF | `EVENT_TYPE_END_OF_TRACE` | `end_of_trace` | `recorded_event_count` (`u64`), `dropped_event_count` (`u64`) | yes (`--output` file only) |
 
 Types marked "not yet" are part of the contract so the analyzer can be built
 against them, but the collector does not produce them yet.
@@ -84,8 +84,11 @@ terminator, so longer names are truncated.
 
 ### End of trace
 
-The last record. It states how many events were recorded and how many were
-dropped because the ring buffer was full.
+The last record of a file, written by the userspace loader (not the BPF
+program) after the final drain. `recorded_event_count` excludes the end record
+itself, and `dropped_event_count` is the `dropped` counter. Its
+`timestamp_nanoseconds` is that of the last recorded event; the other header
+fields are 0. A file without it was cut short.
 
 ## Ordering
 
@@ -95,7 +98,7 @@ analysis.
 
 ## Transport
 
-- A `BPF_MAP_TYPE_RINGBUF` named `rb`, 256 KiB, one `struct event` per record.
+- A `BPF_MAP_TYPE_RINGBUF` named `rb`, 16 MiB, one `struct event` per record.
 - The program reserves a record and zeroes it; if reservation fails the event
   is lost and the global `dropped` counter (`.bss`) is incremented atomically.
 - The loader prints `events: N dropped: M` to stderr on exit.
@@ -105,7 +108,41 @@ analysis.
   collector's own process (`self_tgid`) is always excluded, because reading
   the ring buffer wakes the collector and would otherwise feed back into
   the event stream.
+- With a target, the collector exits on its own once the target process exits
+  (it watches a pidfd, a file descriptor that refers to the process), drains
+  the ring buffer and finishes the file.
 
-TODO: serialization to disk. The proposed file is a small fixed header (magic,
-version, record size, clock, target process, start timestamp), then raw
-`struct event` records, ending with an `EVENT_TYPE_END_OF_TRACE` record.
+## File format
+
+`collector --output FILE [target_tgid]` (short form `-o`) writes a binary file,
+native endianness:
+
+1. One 32-byte `struct event_file_header` (see `bpf/event.h`):
+
+   | Field | Type | Meaning |
+   | --- | --- | --- |
+   | `magic` | `char[4]` | `TRPF`, no terminator |
+   | `format_version` | `u32` | `1`; bumped when `struct event` changes |
+   | `record_size_bytes` | `u32` | `sizeof(struct event)`, currently 40 |
+   | `clock_identifier` | `u32` | `1` = `CLOCK_MONOTONIC`, the same clock as the benchmark's CSV timestamps |
+   | `target_process_identifier` | `u32` | traced process, `0` = no filter |
+   | `reserved` | `u32` | zero |
+   | `start_timestamp_nanoseconds` | `u64` | `CLOCK_MONOTONIC` just before tracing started |
+
+2. `struct event` records back to back, in the order they left the ring buffer.
+3. One `EVENT_TYPE_END_OF_TRACE` record on a clean exit.
+
+Without `--output`, the collector prints one text line per event to stdout, for
+debugging only.
+
+Example run against the benchmark:
+
+```
+./build/pipeline -d 5 ... -o traced_run & make -s run ARGS="--output traced_run.events.bin $!"
+```
+
+`bpf/tools/read_events.py` reads the file: `read_events(path)` yields each
+event as a dictionary with the field names above (payload under the union
+member's name, reserved fields omitted). It also accepts a `.jsonl` file of the
+same dictionaries, for hand-written analyzer tests. Run it directly for a
+summary: `python3 bpf/tools/read_events.py traced_run.events.bin`.
