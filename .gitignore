@@ -24,3 +24,8 @@ experiments/results/
 
 # Collector output
 *.events.bin
+
+# Committed analyzer test fixtures (override the patterns above)
+!analyzer/tests/fixtures/**/*.handoffs.csv
+!analyzer/tests/fixtures/**/*.threads.csv
+!analyzer/tests/fixtures/**/*.events.bin

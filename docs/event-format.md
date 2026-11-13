@@ -141,8 +141,9 @@ Example run against the benchmark:
 ./build/pipeline -d 5 ... -o traced_run & make -s run ARGS="--output traced_run.events.bin $!"
 ```
 
-`bpf/tools/read_events.py` reads the file: `read_events(path)` yields each
-event as a dictionary with the field names above (payload under the union
+The decoder lives in `analyzer/src/analyzer/trace_reader.py`.
+`bpf/tools/read_events.py` is a thin shim around it: `read_events(path)` yields
+each event as a dictionary with the field names above (payload under the union
 member's name, reserved fields omitted). It also accepts a `.jsonl` file of the
 same dictionaries, for hand-written analyzer tests. Run it directly for a
 summary: `python3 bpf/tools/read_events.py traced_run.events.bin`.
