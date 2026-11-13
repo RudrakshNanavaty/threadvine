@@ -1,4 +1,22 @@
-"""Infer thread relationships from block-then-start timing alone."""
+"""Infer thread relationships from block-then-start timing alone.
+
+This is the proposal's "timing-only" baseline: it uses **no** wakeup information.
+The heuristic is "A stopped (blocked), then B started soon after," which can
+suggest a handoff but also fires for unrelated co-scheduling.
+
+Algorithm:
+
+1. When A switches out with ``previous_thread_state != 0`` (blocked — not
+   preempted/runnable), look at every other target thread B that switches in
+   on any CPU within ``--timing-window-us`` (default 100 µs).
+2. Count each such A → B observation.
+3. Collapse unordered pairs to the dominant direction (same as wakeup).
+4. Apply confidence thresholds.
+
+Kernel task-state bits (raw ``previous_thread_state``): ``0`` means runnable /
+preempted; non-zero means blocked (sleeping, uninterruptible, etc.).
+"""
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -14,34 +32,37 @@ from analyzer.trace import Trace
 
 
 def infer(trace: Trace, settings: InferenceSettings) -> Graph:
-    """Count A->B when A blocks and B switches in within the timing window."""
+    """Count A→B when A blocks and B switches in within the timing window."""
     window_nanoseconds = settings.timing_window_us * 1000
     timing_counts: dict[tuple[int, int], int] = defaultdict(int)
 
-    # Collect switch-in events for target threads, sorted (trace.events is sorted).
+    # All target-thread switch-ins in time order (trace.events is already sorted).
     switch_ins: list[tuple[int, int]] = []  # (timestamp_nanoseconds, thread_identifier)
     for event in trace.events:
-        if event['event_type'] != 'EVENT_TYPE_SCHEDULER_SWITCH':
+        if event["event_type"] != "EVENT_TYPE_SCHEDULER_SWITCH":
             continue
-        next_thread = event['scheduler_switch']['next_thread_identifier']
+        next_thread = event["scheduler_switch"]["next_thread_identifier"]
         if next_thread in trace.target_thread_identifiers:
-            switch_ins.append((event['timestamp_nanoseconds'], next_thread))
+            switch_ins.append((event["timestamp_nanoseconds"], next_thread))
 
+    # Sliding cursor: only switch-ins at or after the current block time matter.
     switch_in_index = 0
     for event in trace.events:
-        if event['event_type'] != 'EVENT_TYPE_SCHEDULER_SWITCH':
+        if event["event_type"] != "EVENT_TYPE_SCHEDULER_SWITCH":
             continue
-        switch = event['scheduler_switch']
-        previous_thread = switch['previous_thread_identifier']
-        previous_state = switch['previous_thread_state']
+        switch = event["scheduler_switch"]
+        previous_thread = switch["previous_thread_identifier"]
+        previous_state = switch["previous_thread_state"]
         if previous_thread not in trace.target_thread_identifiers:
             continue
         if previous_state == 0:
-            # Runnable / preempted: not a block.
+            # Runnable / preempted: A did not block waiting for someone else.
             continue
-        block_time = event['timestamp_nanoseconds']
-        # Advance the switch-in cursor past times before this block.
-        while switch_in_index < len(switch_ins) and switch_ins[switch_in_index][0] < block_time:
+        block_time = event["timestamp_nanoseconds"]
+        while (
+            switch_in_index < len(switch_ins)
+            and switch_ins[switch_in_index][0] < block_time
+        ):
             switch_in_index += 1
         cursor = switch_in_index
         while cursor < len(switch_ins):
@@ -52,7 +73,7 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
                 timing_counts[(previous_thread, next_thread)] += 1
             cursor += 1
 
-    # Collapse each unordered pair into the dominant direction.
+    # Same dominant-direction collapse as wakeup_inference.
     seen_pairs: set[frozenset[int]] = set()
     edges: list[Edge] = []
     for (source, destination), forward_count in list(timing_counts.items()):
@@ -86,7 +107,7 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
     }
     graph = Graph(
         metadata=GraphMetadata(
-            method='timing',
+            method="timing",
             minimum_count=settings.minimum_count,
             minimum_fraction=settings.minimum_fraction,
             timing_window_us=settings.timing_window_us,

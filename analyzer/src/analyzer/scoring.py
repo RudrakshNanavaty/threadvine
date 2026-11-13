@@ -1,4 +1,20 @@
-"""Score an inferred graph against the benchmark ground-truth CSVs."""
+"""Score an inferred graph against the benchmark ground-truth CSVs.
+
+Ground truth (see ``docs/ground-truth-format.md``):
+
+- ``PREFIX.threads.csv`` — which tid is producer / worker / sink / main, and group.
+- ``PREFIX.handoffs.csv`` — one row per queue handoff; true edges are the distinct
+  ``(from_tid, to_tid)`` pairs.
+
+Only **confident** edges are scored. Ambiguous edges are counted but do not
+affect precision or recall.
+
+Headline metric: **directed** precision / recall. Undirected figures treat
+A→B and B→A as the same edge (useful when reverse wakeups flipped a pair).
+Cross-group and ``main`` confident edges are reported separately: independent
+pipeline groups must not be linked, and join wakeups into ``main`` are noise.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -9,6 +25,8 @@ from analyzer.graph import Graph
 
 @dataclass
 class ThreadInfo:
+    """One row from ``PREFIX.threads.csv`` (benchmark role metadata)."""
+
     thread_identifier: int
     role: str
     group: int
@@ -17,6 +35,8 @@ class ThreadInfo:
 
 @dataclass
 class ScoreReport:
+    """All numbers printed by ``analyzer score`` (and useful for tests)."""
+
     true_edge_count: int
     confident_edge_count: int
     ambiguous_edge_count: int
@@ -30,7 +50,9 @@ class ScoreReport:
     undirected_false_negatives: int
     undirected_precision: float | None
     undirected_recall: float | None
+    # Should be 0 on a correct run of the multi-group benchmark.
     cross_group_confident_edge_count: int
+    # Usually join/teardown noise if non-zero and confident.
     main_confident_edge_count: int
     missed_edges: list[tuple[int, int]] = field(default_factory=list)
     false_positive_edges: list[tuple[int, int]] = field(default_factory=list)
@@ -38,26 +60,34 @@ class ScoreReport:
     threads: dict[int, ThreadInfo] = field(default_factory=dict)
 
 
-def load_ground_truth(prefix: str) -> tuple[dict[int, ThreadInfo], set[tuple[int, int]]]:
-    """Read PREFIX.threads.csv and PREFIX.handoffs.csv into threads and true edges."""
+def load_ground_truth(
+    prefix: str,
+) -> tuple[dict[int, ThreadInfo], set[tuple[int, int]]]:
+    """Read ``PREFIX.threads.csv`` and ``PREFIX.handoffs.csv``.
+
+    True edges are the set of distinct handoff pairs — item counts are ignored
+    for precision/recall (edge-set scoring, not weighted by volume).
+    """
     threads: dict[int, ThreadInfo] = {}
-    with open(f'{prefix}.threads.csv', newline='') as threads_file:
+    with open(f"{prefix}.threads.csv", newline="") as threads_file:
         for row in csv.DictReader(threads_file):
-            thread_identifier = int(row['tid'])
+            # Column name "tid" is the benchmark's spelling of thread id (gettid()).
+            thread_identifier = int(row["tid"])
             threads[thread_identifier] = ThreadInfo(
                 thread_identifier=thread_identifier,
-                role=row['role'],
-                group=int(row['group']),
-                index=int(row['index']),
+                role=row["role"],
+                group=int(row["group"]),
+                index=int(row["index"]),
             )
     true_edges: set[tuple[int, int]] = set()
-    with open(f'{prefix}.handoffs.csv', newline='') as handoffs_file:
+    with open(f"{prefix}.handoffs.csv", newline="") as handoffs_file:
         for row in csv.DictReader(handoffs_file):
-            true_edges.add((int(row['from_tid']), int(row['to_tid'])))
+            true_edges.add((int(row["from_tid"]), int(row["to_tid"])))
     return threads, true_edges
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:
+    """Return numerator/denominator, or None when the denominator is zero."""
     if denominator == 0:
         return None
     return numerator / denominator
@@ -69,14 +99,15 @@ def score_graph(graph: Graph, ground_truth_prefix: str) -> ScoreReport:
     confident = {
         (edge.source_thread_identifier, edge.destination_thread_identifier)
         for edge in graph.edges
-        if edge.confidence == 'confident'
+        if edge.confidence == "confident"
     }
-    ambiguous_count = sum(1 for edge in graph.edges if edge.confidence == 'ambiguous')
+    ambiguous_count = sum(1 for edge in graph.edges if edge.confidence == "ambiguous")
 
     directed_true_positives = len(confident & true_edges)
     directed_false_positives = len(confident - true_edges)
     directed_false_negatives = len(true_edges - confident)
 
+    # Undirected: direction mistakes still count as a recovered relationship.
     true_undirected = {frozenset(edge) for edge in true_edges}
     confident_undirected = {frozenset(edge) for edge in confident}
     undirected_true_positives = len(confident_undirected & true_undirected)
@@ -90,9 +121,10 @@ def score_graph(graph: Graph, ground_truth_prefix: str) -> ScoreReport:
         destination_info = threads.get(destination)
         if source_info is None or destination_info is None:
             continue
-        if source_info.role == 'main' or destination_info.role == 'main':
+        if source_info.role == "main" or destination_info.role == "main":
             involving_main += 1
         elif source_info.group != destination_info.group:
+            # Independent pipelines must not exchange work.
             cross_group += 1
 
     return ScoreReport(
@@ -107,7 +139,9 @@ def score_graph(graph: Graph, ground_truth_prefix: str) -> ScoreReport:
         undirected_true_positives=undirected_true_positives,
         undirected_false_positives=undirected_false_positives,
         undirected_false_negatives=undirected_false_negatives,
-        undirected_precision=_ratio(undirected_true_positives, len(confident_undirected)),
+        undirected_precision=_ratio(
+            undirected_true_positives, len(confident_undirected)
+        ),
         undirected_recall=_ratio(undirected_true_positives, len(true_undirected)),
         cross_group_confident_edge_count=cross_group,
         main_confident_edge_count=involving_main,
@@ -119,55 +153,57 @@ def score_graph(graph: Graph, ground_truth_prefix: str) -> ScoreReport:
 
 
 def format_thread(thread_identifier: int, threads: dict[int, ThreadInfo]) -> str:
+    """Pretty-print a tid using benchmark role metadata when available."""
     info = threads.get(thread_identifier)
     if info is None:
-        return f'unknown({thread_identifier})'
-    return f'{info.role}[g{info.group}.{info.index}]({thread_identifier})'
+        return f"unknown({thread_identifier})"
+    return f"{info.role}[g{info.group}.{info.index}]({thread_identifier})"
 
 
 def format_score_report(report: ScoreReport) -> str:
+    """Format a ``ScoreReport`` as the multi-line text printed by ``analyzer score``."""
     lines: list[str] = []
     for warning in report.warnings:
-        lines.append(f'WARNING: {warning}')
+        lines.append(f"WARNING: {warning}")
     lines.append(
-        f'true edges: {report.true_edge_count}  '
-        f'confident: {report.confident_edge_count}  '
-        f'ambiguous: {report.ambiguous_edge_count}'
+        f"true edges: {report.true_edge_count}  "
+        f"confident: {report.confident_edge_count}  "
+        f"ambiguous: {report.ambiguous_edge_count}"
     )
 
     def fmt(value: float | None) -> str:
-        return 'n/a' if value is None else f'{value:.3f}'
+        return "n/a" if value is None else f"{value:.3f}"
 
     lines.append(
-        f'directed:   precision={fmt(report.directed_precision)}  '
-        f'recall={fmt(report.directed_recall)}  '
-        f'tp={report.directed_true_positives}  '
-        f'fp={report.directed_false_positives}  '
-        f'fn={report.directed_false_negatives}'
+        f"directed:   precision={fmt(report.directed_precision)}  "
+        f"recall={fmt(report.directed_recall)}  "
+        f"tp={report.directed_true_positives}  "
+        f"fp={report.directed_false_positives}  "
+        f"fn={report.directed_false_negatives}"
     )
     lines.append(
-        f'undirected: precision={fmt(report.undirected_precision)}  '
-        f'recall={fmt(report.undirected_recall)}  '
-        f'tp={report.undirected_true_positives}  '
-        f'fp={report.undirected_false_positives}  '
-        f'fn={report.undirected_false_negatives}'
+        f"undirected: precision={fmt(report.undirected_precision)}  "
+        f"recall={fmt(report.undirected_recall)}  "
+        f"tp={report.undirected_true_positives}  "
+        f"fp={report.undirected_false_positives}  "
+        f"fn={report.undirected_false_negatives}"
     )
     lines.append(
-        f'cross-group confident edges: {report.cross_group_confident_edge_count}  '
-        f'main confident edges: {report.main_confident_edge_count}'
+        f"cross-group confident edges: {report.cross_group_confident_edge_count}  "
+        f"main confident edges: {report.main_confident_edge_count}"
     )
     if report.missed_edges:
-        lines.append('missed true edges:')
+        lines.append("missed true edges:")
         for source, destination in report.missed_edges:
             lines.append(
-                f'  {format_thread(source, report.threads)} -> '
-                f'{format_thread(destination, report.threads)}'
+                f"  {format_thread(source, report.threads)} -> "
+                f"{format_thread(destination, report.threads)}"
             )
     if report.false_positive_edges:
-        lines.append('false positive edges:')
+        lines.append("false positive edges:")
         for source, destination in report.false_positive_edges:
             lines.append(
-                f'  {format_thread(source, report.threads)} -> '
-                f'{format_thread(destination, report.threads)}'
+                f"  {format_thread(source, report.threads)} -> "
+                f"{format_thread(destination, report.threads)}"
             )
-    return '\n'.join(lines)
+    return "\n".join(lines)

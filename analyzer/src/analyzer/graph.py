@@ -1,11 +1,28 @@
-"""Relationship graph types, threshold labeling, and JSON / DOT output."""
+"""Relationship graph types, confidence thresholds, and JSON / DOT output.
+
+An edge A → B means "A hands work to B" (same direction as the benchmark
+ground truth). Each edge carries evidence counts by kind; milestone 1 uses
+``wakeup_count`` / ``reverse_wakeup_count`` or ``timing_count``.
+
+Confidence (frozen defaults after calibration — see ``analyzer/README.md``):
+
+- **confident** if ``primary_count >= minimum_count`` (default 5) *and* the edge
+  is at least ``minimum_fraction`` (default 0.05) of the destination thread's
+  incoming evidence.
+- **ambiguous** otherwise: listed in the graph and drawn dashed in DOT, but
+  excluded from precision / recall.
+
+Startup ``info_lock`` chatter and ``pthread_join`` wakeups into ``main`` usually
+fall below the count threshold and stay ambiguous without special-case trimming.
+"""
+
 from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-
+# Frozen after the -g 2 -w 2 calibration run; override only for experiments.
 DEFAULT_MINIMUM_COUNT = 5
 DEFAULT_MINIMUM_FRACTION = 0.05
 
@@ -17,12 +34,17 @@ class InferenceSettings:
     method: str
     minimum_count: int = DEFAULT_MINIMUM_COUNT
     minimum_fraction: float = DEFAULT_MINIMUM_FRACTION
+    # Used only by the timing method (microseconds).
     timing_window_us: int = 100
 
 
 @dataclass
 class DelaySummary:
-    """Wakeup-to-execution delay percentiles in microseconds."""
+    """Wakeup-to-execution delay percentiles in microseconds.
+
+    Delay = time from ``sched_waking`` until the woken thread's next
+    ``sched_switch`` switch-in. Useful for studying scheduling latency.
+    """
 
     p50_us: float | None = None
     p95_us: float | None = None
@@ -36,23 +58,27 @@ class Edge:
 
     source_thread_identifier: int
     destination_thread_identifier: int
-    confidence: str = 'ambiguous'  # 'confident' or 'ambiguous'
+    confidence: str = "ambiguous"  # 'confident' or 'ambiguous'
+    # Wakeups in the edge direction after dominant-direction collapse.
     wakeup_count: int = 0
+    # Wakeups the other way (e.g. full-queue backpressure); kept for diagnosis.
     reverse_wakeup_count: int = 0
     timing_count: int = 0
     delay: DelaySummary = field(default_factory=DelaySummary)
 
     def primary_count(self, method: str) -> int:
-        if method == 'wakeup':
+        """Evidence count used for thresholding under the given method."""
+        if method == "wakeup":
             return self.wakeup_count
-        if method == 'timing':
+        if method == "timing":
             return self.timing_count
+        # Reserved for a future combined method.
         return self.wakeup_count + self.timing_count
 
 
 @dataclass
 class ThreadSummary:
-    """Per-thread evidence totals and delay summary."""
+    """Per-thread evidence totals and (for wakeup) delay summary."""
 
     thread_identifier: int
     incoming_evidence_count: int = 0
@@ -62,6 +88,8 @@ class ThreadSummary:
 
 @dataclass
 class GraphMetadata:
+    """Provenance and loss flags stored next to the edges in ``graph.json``."""
+
     method: str
     minimum_count: int
     minimum_fraction: float
@@ -76,12 +104,15 @@ class GraphMetadata:
 
 @dataclass
 class Graph:
+    """Inferred relationship graph: metadata, per-thread summaries, and edges."""
+
     metadata: GraphMetadata
     threads: dict[int, ThreadSummary] = field(default_factory=dict)
     edges: list[Edge] = field(default_factory=list)
 
     def apply_thresholds(self, settings: InferenceSettings) -> None:
-        """Label edges confident or ambiguous from count and incoming share."""
+        """Label edges confident or ambiguous; refresh per-thread evidence totals."""
+        # First pass: total incoming evidence per destination (denominator for fraction).
         incoming: dict[int, int] = {}
         for edge in self.edges:
             count = edge.primary_count(settings.method)
@@ -101,10 +132,13 @@ class Graph:
             count = edge.primary_count(settings.method)
             destination_total = incoming.get(edge.destination_thread_identifier, 0)
             fraction = (count / destination_total) if destination_total else 0.0
-            if count >= settings.minimum_count and fraction >= settings.minimum_fraction:
-                edge.confidence = 'confident'
+            if (
+                count >= settings.minimum_count
+                and fraction >= settings.minimum_fraction
+            ):
+                edge.confidence = "confident"
             else:
-                edge.confidence = 'ambiguous'
+                edge.confidence = "ambiguous"
 
         for thread_summary in self.threads.values():
             thread_summary.incoming_evidence_count = 0
@@ -112,15 +146,20 @@ class Graph:
         for edge in self.edges:
             count = edge.primary_count(settings.method)
             self.threads[edge.source_thread_identifier].outgoing_evidence_count += count
-            self.threads[edge.destination_thread_identifier].incoming_evidence_count += count
+            self.threads[
+                edge.destination_thread_identifier
+            ].incoming_evidence_count += count
 
     def loss_warnings(self) -> list[str]:
+        """Human-readable warnings about incomplete or lossy traces."""
         warnings: list[str] = []
         if not self.metadata.has_end_of_trace:
-            warnings.append('trace has no END_OF_TRACE record; it may have been cut short')
+            warnings.append(
+                "trace has no END_OF_TRACE record; it may have been cut short"
+            )
         if self.metadata.dropped_event_count > 0:
             warnings.append(
-                f'trace reports {self.metadata.dropped_event_count} dropped events'
+                f"trace reports {self.metadata.dropped_event_count} dropped events"
             )
         return warnings
 
@@ -147,35 +186,36 @@ def summarize_delays_nanoseconds(delays_nanoseconds: list[int]) -> DelaySummary:
 
 def _delay_to_dict(delay: DelaySummary) -> dict[str, Any]:
     return {
-        'p50_us': delay.p50_us,
-        'p95_us': delay.p95_us,
-        'max_us': delay.max_us,
-        'sample_count': delay.sample_count,
+        "p50_us": delay.p50_us,
+        "p95_us": delay.p95_us,
+        "max_us": delay.max_us,
+        "sample_count": delay.sample_count,
     }
 
 
 def graph_to_dict(graph: Graph) -> dict[str, Any]:
+    """Serialize a graph to the ``graph.json`` dictionary shape."""
     metadata = asdict(graph.metadata)
     return {
-        'metadata': metadata,
-        'threads': {
+        "metadata": metadata,
+        "threads": {
             str(thread_identifier): {
-                'thread_identifier': summary.thread_identifier,
-                'incoming_evidence_count': summary.incoming_evidence_count,
-                'outgoing_evidence_count': summary.outgoing_evidence_count,
-                'delay': _delay_to_dict(summary.delay),
+                "thread_identifier": summary.thread_identifier,
+                "incoming_evidence_count": summary.incoming_evidence_count,
+                "outgoing_evidence_count": summary.outgoing_evidence_count,
+                "delay": _delay_to_dict(summary.delay),
             }
             for thread_identifier, summary in sorted(graph.threads.items())
         },
-        'edges': [
+        "edges": [
             {
-                'source_thread_identifier': edge.source_thread_identifier,
-                'destination_thread_identifier': edge.destination_thread_identifier,
-                'confidence': edge.confidence,
-                'wakeup_count': edge.wakeup_count,
-                'reverse_wakeup_count': edge.reverse_wakeup_count,
-                'timing_count': edge.timing_count,
-                'delay': _delay_to_dict(edge.delay),
+                "source_thread_identifier": edge.source_thread_identifier,
+                "destination_thread_identifier": edge.destination_thread_identifier,
+                "confidence": edge.confidence,
+                "wakeup_count": edge.wakeup_count,
+                "reverse_wakeup_count": edge.reverse_wakeup_count,
+                "timing_count": edge.timing_count,
+                "delay": _delay_to_dict(edge.delay),
             }
             for edge in sorted(
                 graph.edges,
@@ -189,35 +229,39 @@ def graph_to_dict(graph: Graph) -> dict[str, Any]:
 
 
 def write_graph_json(graph: Graph, path: str) -> None:
-    with open(path, 'w') as output_file:
+    """Write ``graph.json`` (indent=2) for ``analyzer score`` and humans."""
+    with open(path, "w") as output_file:
         json.dump(graph_to_dict(graph), output_file, indent=2)
-        output_file.write('\n')
+        output_file.write("\n")
 
 
 def load_graph_json(path: str) -> Graph:
+    """Load a graph previously written by ``write_graph_json``."""
     with open(path) as input_file:
         data = json.load(input_file)
-    metadata = GraphMetadata(**data['metadata'])
+    metadata = GraphMetadata(**data["metadata"])
     threads: dict[int, ThreadSummary] = {}
-    for thread_key, summary in data.get('threads', {}).items():
-        delay = DelaySummary(**summary.get('delay', {}))
+    for thread_key, summary in data.get("threads", {}).items():
+        delay = DelaySummary(**summary.get("delay", {}))
         threads[int(thread_key)] = ThreadSummary(
-            thread_identifier=summary['thread_identifier'],
-            incoming_evidence_count=summary.get('incoming_evidence_count', 0),
-            outgoing_evidence_count=summary.get('outgoing_evidence_count', 0),
+            thread_identifier=summary["thread_identifier"],
+            incoming_evidence_count=summary.get("incoming_evidence_count", 0),
+            outgoing_evidence_count=summary.get("outgoing_evidence_count", 0),
             delay=delay,
         )
     edges: list[Edge] = []
-    for edge_data in data.get('edges', []):
-        delay = DelaySummary(**edge_data.get('delay', {}))
+    for edge_data in data.get("edges", []):
+        delay = DelaySummary(**edge_data.get("delay", {}))
         edges.append(
             Edge(
-                source_thread_identifier=edge_data['source_thread_identifier'],
-                destination_thread_identifier=edge_data['destination_thread_identifier'],
-                confidence=edge_data.get('confidence', 'ambiguous'),
-                wakeup_count=edge_data.get('wakeup_count', 0),
-                reverse_wakeup_count=edge_data.get('reverse_wakeup_count', 0),
-                timing_count=edge_data.get('timing_count', 0),
+                source_thread_identifier=edge_data["source_thread_identifier"],
+                destination_thread_identifier=edge_data[
+                    "destination_thread_identifier"
+                ],
+                confidence=edge_data.get("confidence", "ambiguous"),
+                wakeup_count=edge_data.get("wakeup_count", 0),
+                reverse_wakeup_count=edge_data.get("reverse_wakeup_count", 0),
+                timing_count=edge_data.get("timing_count", 0),
                 delay=delay,
             )
         )
@@ -225,23 +269,29 @@ def load_graph_json(path: str) -> Graph:
 
 
 def write_graph_dot(graph: Graph, path: str) -> None:
-    """Write Graphviz DOT: solid confident edges, dashed ambiguous edges."""
-    lines = ['digraph thread_relationships {', '  rankdir=LR;']
+    """Write Graphviz DOT: solid confident edges, dashed ambiguous edges.
+
+    Render with e.g. ``dot -Tpng graph.dot -o graph.png``.
+    """
+    lines = ["digraph thread_relationships {", "  rankdir=LR;"]
     for thread_identifier in sorted(graph.threads):
         lines.append(f'  t{thread_identifier} [label="{thread_identifier}"];')
     for edge in sorted(
         graph.edges,
-        key=lambda edge: (edge.source_thread_identifier, edge.destination_thread_identifier),
+        key=lambda edge: (
+            edge.source_thread_identifier,
+            edge.destination_thread_identifier,
+        ),
     ):
-        style = 'solid' if edge.confidence == 'confident' else 'dashed'
-        if graph.metadata.method == 'timing':
+        style = "solid" if edge.confidence == "confident" else "dashed"
+        if graph.metadata.method == "timing":
             label_count = edge.timing_count
         else:
             label_count = edge.wakeup_count
         lines.append(
-            f'  t{edge.source_thread_identifier} -> t{edge.destination_thread_identifier} '
+            f"  t{edge.source_thread_identifier} -> t{edge.destination_thread_identifier} "
             f'[style={style}, label="{label_count}"];'
         )
-    lines.append('}')
-    with open(path, 'w') as output_file:
-        output_file.write('\n'.join(lines) + '\n')
+    lines.append("}")
+    with open(path, "w") as output_file:
+        output_file.write("\n".join(lines) + "\n")

@@ -1,0 +1,17 @@
+# Workspace root: shared .venv for Cursor and `uv` / `just` from the repo root.
+# The installable package lives in analyzer/.
+
+[project]
+name = "os-project"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = ["analyzer"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+analyzer = { workspace = true }
+
+[tool.uv.workspace]
+members = ["analyzer"]

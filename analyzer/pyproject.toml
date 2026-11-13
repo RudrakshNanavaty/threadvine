@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Infer and score thread relationship graphs from eBPF collector traces"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "typer>=0.29.1",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
@@ -19,3 +21,8 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+# NCSU NFS home ACLs force the execute bit on every file, so EXE002 is
+# always false-positive here. Invoke via `uv run analyzer` / just, not ./cli.py.
+[tool.ruff.lint]
+ignore = ["EXE002"]

@@ -1,4 +1,23 @@
-"""Infer thread relationships from sched_waking events."""
+"""Infer thread relationships from ``sched_waking`` events.
+
+A wakeup A → B means the kernel ran ``sched_waking`` in A's context for B.
+In the validation benchmark, producers wake workers (and workers wake sinks)
+via condition-variable signals. The same queues also cause *reverse* wakeups
+when full (taker signals the putter) — so raw wakeup direction is not always
+the work-flow direction.
+
+This method:
+
+1. Counts in-process wakeups per ordered pair (both ends in the target process).
+2. Measures wakeup-to-execution delay (waking timestamp → next switch-in of B).
+3. Collapses each unordered pair into one directed edge in the **dominant**
+   direction, keeping the minority count as ``reverse_wakeup_count``.
+4. Applies confidence thresholds via ``Graph.apply_thresholds``.
+
+Outside wakers (idle, softirq) never form edges: they are not in
+``trace.target_thread_identifiers``.
+"""
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -22,32 +41,34 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
     delays_by_pair: dict[tuple[int, int], list[int]] = defaultdict(list)
     delays_by_thread: dict[int, list[int]] = defaultdict(list)
 
-    # Build a list of switch-in times for each thread for delay lookup.
+    # Precompute switch-in times per thread so each waking can find the next one.
+    # next_thread_identifier is who is about to run on that CPU.
     switch_in_times: dict[int, list[int]] = defaultdict(list)
     for event in trace.events:
-        if event['event_type'] != 'EVENT_TYPE_SCHEDULER_SWITCH':
+        if event["event_type"] != "EVENT_TYPE_SCHEDULER_SWITCH":
             continue
-        next_thread = event['scheduler_switch']['next_thread_identifier']
+        next_thread = event["scheduler_switch"]["next_thread_identifier"]
         if next_thread in trace.target_thread_identifiers:
-            switch_in_times[next_thread].append(event['timestamp_nanoseconds'])
+            switch_in_times[next_thread].append(event["timestamp_nanoseconds"])
 
-    # Advance indices into switch_in_times as we walk wakeups in time order.
+    # Monotone cursors: events are time-sorted, so we never scan backward.
     switch_in_index: dict[int, int] = defaultdict(int)
 
     for event in trace.events:
-        if event['event_type'] != 'EVENT_TYPE_SCHEDULER_WAKING':
+        if event["event_type"] != "EVENT_TYPE_SCHEDULER_WAKING":
             continue
-        waker = event['thread_identifier']
-        woken = event['scheduler_waking']['woken_thread_identifier']
+        waker = event["thread_identifier"]
+        woken = event["scheduler_waking"]["woken_thread_identifier"]
         if waker == woken:
             continue
+        # Edges require both endpoints inside the traced application.
         if waker not in trace.target_thread_identifiers:
             continue
         if woken not in trace.target_thread_identifiers:
             continue
         wakeup_counts[(waker, woken)] += 1
 
-        waking_time = event['timestamp_nanoseconds']
+        waking_time = event["timestamp_nanoseconds"]
         times = switch_in_times.get(woken, [])
         index = switch_in_index[woken]
         while index < len(times) and times[index] < waking_time:
@@ -58,7 +79,7 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
             delays_by_pair[(waker, woken)].append(delay_nanoseconds)
             delays_by_thread[woken].append(delay_nanoseconds)
 
-    # Collapse each unordered pair into one directed edge in the dominant direction.
+    # One edge per unordered pair; ties break toward the lower thread id.
     seen_pairs: set[frozenset[int]] = set()
     edges: list[Edge] = []
     for (waker, woken), forward_count in list(wakeup_counts.items()):
@@ -91,12 +112,14 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
     for thread_identifier in trace.target_thread_identifiers:
         threads[thread_identifier] = ThreadSummary(
             thread_identifier=thread_identifier,
-            delay=summarize_delays_nanoseconds(delays_by_thread.get(thread_identifier, [])),
+            delay=summarize_delays_nanoseconds(
+                delays_by_thread.get(thread_identifier, [])
+            ),
         )
 
     graph = Graph(
         metadata=GraphMetadata(
-            method='wakeup',
+            method="wakeup",
             minimum_count=settings.minimum_count,
             minimum_fraction=settings.minimum_fraction,
             timing_window_us=None,

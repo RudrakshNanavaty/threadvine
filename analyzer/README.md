@@ -8,16 +8,22 @@ The analyzer never runs during tracing. Point it at a finished `.events.bin`
 
 ## Setup
 
+From the **repo root** (uv workspace; `.venv` is created there for Cursor):
+
 ```
-cd analyzer
-uv sync --extra dev
+uv sync --package analyzer --extra dev
+# or: just sync
 ```
 
 ## Commands
 
+From the repo root:
+
 ```
 uv run analyzer infer TRACE --method wakeup|timing [-o graph.json] [--dot FILE]
+# DOT defaults to the same stem as -o (graph.json -> graph.dot)
 uv run analyzer score graph.json --groundtruth PREFIX
+# or: just infer … / just score …
 ```
 
 `infer` reads only the trace. `score` reads only the graph and the benchmark's
@@ -33,10 +39,10 @@ the collector.
 # terminal 2 (after it prints its pid)
 make run ARGS="-o traced_run.events.bin <pid>"
 
-# after both finish
-cd analyzer
-uv run analyzer infer ../traced_run.events.bin --method wakeup -o wakeup.json --dot wakeup.dot
-uv run analyzer score wakeup.json --groundtruth ../groundtruth
+# after both finish (repo root)
+uv run analyzer infer traced_run.events.bin --method wakeup -o analyzer/wakeup.json
+# also writes analyzer/wakeup.dot; render with: dot -Tpng analyzer/wakeup.dot -o wakeup.png
+uv run analyzer score analyzer/wakeup.json --groundtruth groundtruth
 ```
 
 ## Methods
@@ -75,8 +81,8 @@ numbers.
 ## Tests
 
 ```
-cd analyzer
-uv run pytest
+just test
+# or: cd analyzer && uv run pytest
 ```
 
 Hand-written `.jsonl` fixtures cover ordering, reverse wakeups, outside-process

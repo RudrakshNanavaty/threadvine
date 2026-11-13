@@ -37,7 +37,6 @@ def test_infer_and_score_round_trip(tmp_path: Path) -> None:
         'infer', str(trace_path),
         '--method', 'wakeup',
         '-o', str(graph_path),
-        '--dot', str(dot_path),
         '--minimum-count', '5',
     ]) == 0
     assert graph_path.exists()

@@ -1,4 +1,19 @@
-"""Load, sort, and filter a collector trace for inference."""
+"""Load, sort, and filter a collector trace for inference.
+
+The raw file can mix target-app events with wakeups/switches that involve the
+idle thread or other processes (the collector keeps events where *either* side
+belongs to the target). This module decides which process is "the target",
+learns which thread IDs belong to it, drops events that name no target thread
+at all, and sorts the rest by timestamp.
+
+Important distinction for newcomers:
+
+- Events that involve one outside thread (e.g. idle → worker switch-in) are
+  **kept**. Delay measurement needs those switch-ins.
+- Graph **edges** are formed later only when *both* endpoints are in-process
+  (see ``wakeup_inference`` / ``timing_inference``).
+"""
+
 from __future__ import annotations
 
 from collections import Counter
@@ -9,43 +24,48 @@ from analyzer.trace_reader import is_binary_trace, read_events, read_file_header
 
 @dataclass
 class Trace:
-    """A sorted, process-filtered view of a collector trace."""
+    """A sorted, process-filtered view of a collector trace ready for inference."""
 
     path: str
     events: list[dict]
     target_process_identifier: int
-    # Counts recorded by the collector (from END_OF_TRACE), excluding that record.
+    # From END_OF_TRACE: how many events the collector recorded (excludes that record).
     recorded_event_count: int | None = None
+    # From END_OF_TRACE: ring-buffer reservation failures (lost events).
     dropped_event_count: int = 0
     has_end_of_trace: bool = False
-    # Events whose actor or other involved thread is outside the target process.
+    # Events discarded here because no named thread belonged to the target.
     outside_process_event_count: int = 0
-    # Thread id -> process id, built from actor and waking payload fields.
+    # Thread id -> process id, learned from actor fields and waking payloads.
     thread_to_process: dict[int, int] = field(default_factory=dict)
-    # Thread ids that belong to the target process.
+    # Subset of thread_to_process keys whose process is the target.
     target_thread_identifiers: set[int] = field(default_factory=set)
 
 
 def _learn_process_map(events: list[dict]) -> dict[int, int]:
-    """Map each seen thread id to a process id from actor and waking fields."""
+    """Map each seen thread id to a process id from actor and waking fields.
+
+    A ``sched_switch`` alone does not name the next thread's process, so
+    ``next_thread_identifier`` is filled in only when that thread later appears
+    as an actor (or as a woken thread on a waking event).
+    """
     thread_to_process: dict[int, int] = {}
     for event in events:
-        if event['event_type'] == 'EVENT_TYPE_END_OF_TRACE':
+        if event["event_type"] == "EVENT_TYPE_END_OF_TRACE":
             continue
-        thread_identifier = event.get('thread_identifier')
-        process_identifier = event.get('process_identifier')
+        thread_identifier = event.get("thread_identifier")
+        process_identifier = event.get("process_identifier")
+        # Skip id 0: idle / kernel context, never a userspace target thread.
         if thread_identifier and process_identifier:
             thread_to_process[thread_identifier] = process_identifier
-        if event['event_type'] == 'EVENT_TYPE_SCHEDULER_WAKING':
-            waking = event['scheduler_waking']
-            woken_thread = waking['woken_thread_identifier']
-            woken_process = waking['woken_process_identifier']
+        if event["event_type"] == "EVENT_TYPE_SCHEDULER_WAKING":
+            # sched_waking fires in the *waker's* context; the woken thread's
+            # process is in the payload (see docs/event-format.md).
+            waking = event["scheduler_waking"]
+            woken_thread = waking["woken_thread_identifier"]
+            woken_process = waking["woken_process_identifier"]
             if woken_thread and woken_process:
                 thread_to_process[woken_thread] = woken_process
-        if event['event_type'] == 'EVENT_TYPE_SCHEDULER_SWITCH':
-            # next_thread_identifier's process is unknown from the switch alone;
-            # it will be filled in when that thread is the actor of another event.
-            pass
     return thread_to_process
 
 
@@ -54,24 +74,26 @@ def _pick_target_process(
     events: list[dict],
     thread_to_process: dict[int, int],
 ) -> int:
-    """Use the binary header's target, or the most common process in the events."""
+    """Prefer the binary header's target; else the most common process in the events.
+
+    ``.jsonl`` fixtures have no header, so majority vote is the fallback.
+    """
     if is_binary_trace(path):
         header = read_file_header(path)
-        target = header['target_process_identifier']
+        target = header["target_process_identifier"]
         if target:
             return target
     process_counts: Counter[int] = Counter()
     for event in events:
-        if event['event_type'] == 'EVENT_TYPE_END_OF_TRACE':
+        if event["event_type"] == "EVENT_TYPE_END_OF_TRACE":
             continue
-        process_identifier = event.get('process_identifier')
+        process_identifier = event.get("process_identifier")
         if process_identifier:
             process_counts[process_identifier] += 1
     if not process_counts:
-        # Fall back to whatever the process map learned.
         process_counts = Counter(thread_to_process.values())
     if not process_counts:
-        raise ValueError(f'{path}: no process identifiers found in the trace')
+        raise ValueError(f"{path}: no process identifiers found in the trace")
     return process_counts.most_common(1)[0][0]
 
 
@@ -82,6 +104,7 @@ def _thread_is_in_target(
     process_identifier: int | None = None,
 ) -> bool:
     """True if this thread is known to belong to the target process."""
+    # Thread 0 / process 0 is the idle / kernel context, never the application.
     if thread_identifier == 0:
         return False
     if process_identifier is not None and process_identifier != 0:
@@ -101,35 +124,35 @@ def _event_involves_no_target_thread(
     an outside waker, are kept: inference still needs the target side. Edges
     are formed later only when both endpoints are in-process.
     """
-    if event['event_type'] == 'EVENT_TYPE_END_OF_TRACE':
+    if event["event_type"] == "EVENT_TYPE_END_OF_TRACE":
         return False
 
     if _thread_is_in_target(
-        event['thread_identifier'],
+        event["thread_identifier"],
         target_process_identifier,
         thread_to_process,
-        event.get('process_identifier'),
+        event.get("process_identifier"),
     ):
         return False
-    if event['event_type'] == 'EVENT_TYPE_SCHEDULER_WAKING':
-        waking = event['scheduler_waking']
+    if event["event_type"] == "EVENT_TYPE_SCHEDULER_WAKING":
+        waking = event["scheduler_waking"]
         if _thread_is_in_target(
-            waking['woken_thread_identifier'],
+            waking["woken_thread_identifier"],
             target_process_identifier,
             thread_to_process,
-            waking.get('woken_process_identifier'),
+            waking.get("woken_process_identifier"),
         ):
             return False
-    if event['event_type'] == 'EVENT_TYPE_SCHEDULER_SWITCH':
-        switch = event['scheduler_switch']
+    if event["event_type"] == "EVENT_TYPE_SCHEDULER_SWITCH":
+        switch = event["scheduler_switch"]
         if _thread_is_in_target(
-            switch['previous_thread_identifier'],
+            switch["previous_thread_identifier"],
             target_process_identifier,
             thread_to_process,
         ):
             return False
         if _thread_is_in_target(
-            switch['next_thread_identifier'],
+            switch["next_thread_identifier"],
             target_process_identifier,
             thread_to_process,
         ):
@@ -138,20 +161,33 @@ def _event_involves_no_target_thread(
 
 
 def load_trace(path: str) -> Trace:
-    """Read a binary or .jsonl trace, sort it, and keep only in-process events."""
+    """Read a binary or ``.jsonl`` trace, sort it, and drop pure outside-process noise.
+
+    Steps: decode → read END_OF_TRACE loss counters → learn thread→process map →
+    pick target → keep events that involve the target → sort by timestamp.
+    """
     raw_events = list(read_events(path))
     recorded_event_count: int | None = None
     dropped_event_count = 0
     has_end_of_trace = False
+
     for event in raw_events:
-        if event['event_type'] == 'EVENT_TYPE_END_OF_TRACE':
+        # If the event is an END_OF_TRACE event,
+        if event["event_type"] == "EVENT_TYPE_END_OF_TRACE":
             has_end_of_trace = True
-            end = event['end_of_trace']
-            recorded_event_count = end['recorded_event_count']
-            dropped_event_count = end['dropped_event_count']
+
+            # Set the recorded_event_count and dropped_event_count
+            # to the values from the end_of_trace event
+            end = event["end_of_trace"]
+            recorded_event_count = end["recorded_event_count"]
+            dropped_event_count = end["dropped_event_count"]
 
     thread_to_process = _learn_process_map(raw_events)
-    target_process_identifier = _pick_target_process(path, raw_events, thread_to_process)
+
+    target_process_identifier = _pick_target_process(
+        path, raw_events, thread_to_process
+    )
+
     target_thread_identifiers = {
         thread_identifier
         for thread_identifier, process_identifier in thread_to_process.items()
@@ -161,14 +197,18 @@ def load_trace(path: str) -> Trace:
     outside_process_event_count = 0
     kept: list[dict] = []
     for event in raw_events:
-        if event['event_type'] == 'EVENT_TYPE_END_OF_TRACE':
+        if event["event_type"] == "EVENT_TYPE_END_OF_TRACE":
+            # Metadata only; not an observation for inference.
             continue
-        if _event_involves_no_target_thread(event, target_process_identifier, thread_to_process):
+        if _event_involves_no_target_thread(
+            event, target_process_identifier, thread_to_process
+        ):
             outside_process_event_count += 1
             continue
         kept.append(event)
 
-    kept.sort(key=lambda event: event['timestamp_nanoseconds'])
+    # Ring buffer can deliver records slightly out of timestamp order across CPUs.
+    kept.sort(key=lambda event: event["timestamp_nanoseconds"])
     return Trace(
         path=path,
         events=kept,

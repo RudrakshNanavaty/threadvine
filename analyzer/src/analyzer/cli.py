@@ -1,9 +1,19 @@
-"""Command-line interface: infer and score subcommands."""
+"""Command-line interface: ``infer`` and ``score`` subcommands.
+
+``infer`` never opens ground-truth files. ``score`` never opens a raw trace.
+That split is intentional: relationship discovery must not peek at the answer
+key (see ``docs/ground-truth-format.md``).
+"""
+
 from __future__ import annotations
 
-import argparse
 import sys
+from pathlib import Path
+from typing import Annotated, Literal
 
+import typer
+
+from analyzer import timing_inference, wakeup_inference
 from analyzer.graph import (
     DEFAULT_MINIMUM_COUNT,
     DEFAULT_MINIMUM_FRACTION,
@@ -14,105 +24,121 @@ from analyzer.graph import (
 )
 from analyzer.scoring import format_score_report, score_graph
 from analyzer.trace import load_trace
-from analyzer import timing_inference, wakeup_inference
+
+app = typer.Typer(
+    help="Infer and score thread relationship graphs from collector traces.",
+    no_args_is_help=True,
+)
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog='analyzer',
-        description='Infer and score thread relationship graphs from collector traces.',
-    )
-    subparsers = parser.add_subparsers(dest='command', required=True)
-
-    infer = subparsers.add_parser('infer', help='Infer a graph from a collector trace')
-    infer.add_argument('trace', help='Binary .events.bin or .jsonl trace file')
-    infer.add_argument(
-        '--method',
-        choices=('wakeup', 'timing'),
-        required=True,
-        help='Inference method',
-    )
-    infer.add_argument('-o', '--output', default='graph.json', help='Output graph JSON path')
-    infer.add_argument('--dot', default=None, help='Optional Graphviz DOT output path')
-    infer.add_argument(
-        '--minimum-count',
-        type=int,
-        default=DEFAULT_MINIMUM_COUNT,
-        help=f'Minimum evidence count for a confident edge (default {DEFAULT_MINIMUM_COUNT})',
-    )
-    infer.add_argument(
-        '--minimum-fraction',
-        type=float,
-        default=DEFAULT_MINIMUM_FRACTION,
-        help=(
-            'Minimum share of the destination thread\'s incoming evidence '
-            f'(default {DEFAULT_MINIMUM_FRACTION})'
+@app.command()
+def infer(
+    trace: Annotated[
+        Path,
+        typer.Argument(help="Binary .events.bin or .jsonl trace file"),
+    ],
+    method: Annotated[
+        Literal["wakeup", "timing"],
+        typer.Option(help="Inference method"),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("-o", "--output", help="Output graph JSON path"),
+    ] = Path("graph.json"),
+    dot: Annotated[
+        Path | None,
+        typer.Option(
+            help=(
+                "Graphviz DOT output path "
+                "(default: same stem as --output with .dot)"
+            ),
         ),
-    )
-    infer.add_argument(
-        '--timing-window-us',
-        type=int,
-        default=100,
-        help='Timing method: block-to-switch-in window in microseconds (default 100)',
-    )
-
-    score = subparsers.add_parser('score', help='Score a graph against ground truth')
-    score.add_argument('graph', help='graph.json produced by infer')
-    score.add_argument(
-        '--groundtruth',
-        required=True,
-        help='Prefix of the benchmark ground-truth CSV files',
-    )
-    return parser
-
-
-def _run_infer(arguments: argparse.Namespace) -> int:
+    ] = None,
+    minimum_count: Annotated[
+        int,
+        typer.Option(
+            help=(
+                "Minimum evidence count for a confident edge "
+                f"(default {DEFAULT_MINIMUM_COUNT})"
+            ),
+        ),
+    ] = DEFAULT_MINIMUM_COUNT,
+    minimum_fraction: Annotated[
+        float,
+        typer.Option(
+            help=(
+                "Minimum share of the destination thread's incoming evidence "
+                f"(default {DEFAULT_MINIMUM_FRACTION})"
+            ),
+        ),
+    ] = DEFAULT_MINIMUM_FRACTION,
+    timing_window_us: Annotated[
+        int,
+        typer.Option(
+            help=(
+                "Timing method: block-to-switch-in window in microseconds (default 100)"
+            ),
+        ),
+    ] = 100,
+) -> int:
+    """Infer a graph from a collector trace."""
     settings = InferenceSettings(
-        method=arguments.method,
-        minimum_count=arguments.minimum_count,
-        minimum_fraction=arguments.minimum_fraction,
-        timing_window_us=arguments.timing_window_us,
+        method=method,
+        minimum_count=minimum_count,
+        minimum_fraction=minimum_fraction,
+        timing_window_us=timing_window_us,
     )
-    trace = load_trace(arguments.trace)
-    if arguments.method == 'wakeup':
-        graph = wakeup_inference.infer(trace, settings)
+    loaded_trace = load_trace(str(trace))
+    if method == "wakeup":
+        graph = wakeup_inference.infer(loaded_trace, settings)
     else:
-        graph = timing_inference.infer(trace, settings)
+        graph = timing_inference.infer(loaded_trace, settings)
 
+    # Lossy traces still produce a graph; warnings travel into score via metadata.
     for warning in graph.loss_warnings():
-        print(f'WARNING: {warning}', file=sys.stderr)
-    if trace.outside_process_event_count:
+        print(f"WARNING: {warning}", file=sys.stderr)
+    if loaded_trace.outside_process_event_count:
         print(
-            f'note: dropped {trace.outside_process_event_count} events involving '
-            'threads outside the target process',
+            f"note: dropped {loaded_trace.outside_process_event_count} events involving "
+            "threads outside the target process",
             file=sys.stderr,
         )
 
-    write_graph_json(graph, arguments.output)
+    output_path = str(output)
+    write_graph_json(graph, output_path)
     print(
-        f'wrote {arguments.output}: {len(graph.edges)} edges '
-        f'({sum(1 for edge in graph.edges if edge.confidence == "confident")} confident, '
-        f'{sum(1 for edge in graph.edges if edge.confidence == "ambiguous")} ambiguous)'
+        f"wrote {output_path}: {len(graph.edges)} edges "
+        f"({sum(1 for edge in graph.edges if edge.confidence == 'confident')} confident, "
+        f"{sum(1 for edge in graph.edges if edge.confidence == 'ambiguous')} ambiguous)"
     )
-    if arguments.dot:
-        write_graph_dot(graph, arguments.dot)
-        print(f'wrote {arguments.dot}')
+    dot_path = str(dot) if dot is not None else str(output.with_suffix(".dot"))
+    write_graph_dot(graph, dot_path)
+    print(f"wrote {dot_path}")
     return 0
 
 
-def _run_score(arguments: argparse.Namespace) -> int:
-    graph = load_graph_json(arguments.graph)
-    report = score_graph(graph, arguments.groundtruth)
+@app.command()
+def score(
+    graph: Annotated[
+        Path,
+        typer.Argument(help="graph.json produced by infer"),
+    ],
+    groundtruth: Annotated[
+        str,
+        typer.Option(help="Prefix of the benchmark ground-truth CSV files"),
+    ],
+) -> int:
+    """Score a graph against ground truth."""
+    loaded_graph = load_graph_json(str(graph))
+    report = score_graph(loaded_graph, groundtruth)
     print(format_score_report(report))
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _build_parser()
-    arguments = parser.parse_args(argv)
-    if arguments.command == 'infer':
-        return _run_infer(arguments)
-    if arguments.command == 'score':
-        return _run_score(arguments)
-    parser.error(f'unknown command {arguments.command}')
-    return 2
+    """Parse argv and dispatch to ``infer`` or ``score``. Returns a process exit code."""
+    try:
+        result = app(args=argv, standalone_mode=False)
+    except typer.Exit as exit_error:
+        return int(exit_error.exit_code)
+    return 0 if result is None else int(result)
