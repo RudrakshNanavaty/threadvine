@@ -1,0 +1,10 @@
+tid,role,group,index
+1684700,main,-1,0
+1684723,producer,0,0
+1684724,worker,0,0
+1684725,worker,0,1
+1684726,sink,0,0
+1684727,producer,1,0
+1684728,worker,1,0
+1684729,worker,1,1
+1684730,sink,1,0
