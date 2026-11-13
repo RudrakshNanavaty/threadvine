@@ -13,6 +13,10 @@
 //
 // Build:  make bench        (or: gcc -O2 -pthread bench/pipeline.c -o pipeline)
 // Run:    ./pipeline -h
+//
+// Exit status: 0 = the run completed and both ground-truth files were written
+// completely; 1 = bad options, a thread could not be created, or a file could
+// not be written. Never trust a run whose exit status is not 0.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <getopt.h>
@@ -173,8 +177,10 @@ static void log_init(Log *l, size_t cap)
 
 static void log_add(Log *l, int group, int stage, Item it, int to_tid, uint64_t get_ns)
 {
-    if (l->n >= l->cap)
-        return; /* cannot happen: buffers are sized for the worst case */
+    if (l->n >= l->cap) { /* cannot happen: buffers are sized for the worst case */
+        fprintf(stderr, "internal error: ground-truth buffer overflow\n");
+        abort();
+    }
     l->v[l->n++] = (Handoff){ group, stage, it.sender_tid, to_tid, it.id, it.put_ns, get_ns };
 }
 
@@ -217,6 +223,19 @@ typedef struct {
     uint64_t *lat; /* sink only: end-to-end latency per item */
     size_t nlat;
 } ThreadArg;
+
+/* Create a thread, or stop the whole run with a clear message. A benchmark
+ * that silently runs with fewer threads would produce a wrong answer key. */
+static void spawn(pthread_t *thread, void *(*fn)(void *), ThreadArg *a, const char *role)
+{
+    int rc = pthread_create(thread, NULL, fn, a);
+
+    if (rc != 0) {
+        fprintf(stderr, "error: cannot create %s thread (group %d): %s\n", role, a->group,
+                strerror(rc));
+        exit(1);
+    }
+}
 
 static void *producer(void *p)
 {
@@ -284,6 +303,13 @@ static int cmp_handoff(const void *x, const void *y)
     return (a->get_ns > b->get_ns) - (a->get_ns < b->get_ns);
 }
 
+/* Percentile convention (stated here so results can be reproduced):
+ *   - sort the latencies ascending, indices start at 0;
+ *   - pXX = the value at index floor(q * n), clamped to n - 1, where q = XX / 100;
+ *   - no interpolation; q = 1.0 gives the maximum.
+ * Example: n = 50, p50 -> index 25 (the 26th smallest value), p95 -> index 47.
+ * The textbook "nearest-rank" rule uses index ceil(q * n) - 1; the two rules
+ * differ only when q * n is a whole number (for example p50 with n = 50). */
 static double pct_ms(const uint64_t *sorted, size_t n, double q)
 {
     size_t idx = (size_t)(q * (double)n);
@@ -292,35 +318,58 @@ static double pct_ms(const uint64_t *sorted, size_t n, double q)
     return (double)sorted[idx] / 1e6;
 }
 
-static void write_files(const Handoff *all, size_t n)
+/* Close a file and report whether everything reached it. fclose() is the call
+ * that notices a failed final flush (for example a full disk). */
+static int close_checked(FILE *f, const char *path)
+{
+    int bad = ferror(f) != 0;
+
+    if (fclose(f) != 0)
+        bad = 1;
+    if (bad)
+        fprintf(stderr, "error: failed while writing %s\n", path);
+    return bad ? -1 : 0;
+}
+
+static int open_output(FILE **f, const char *suffix, char *path, size_t path_len)
+{
+    int len = snprintf(path, path_len, "%s.%s.csv", cfg_prefix, suffix);
+
+    if (len < 0 || (size_t)len >= path_len) {
+        fprintf(stderr, "error: output prefix is too long\n");
+        return -1;
+    }
+    *f = fopen(path, "w");
+    if (!*f) {
+        perror(path);
+        return -1;
+    }
+    return 0;
+}
+
+/* Returns 0 only if both files were written completely. */
+static int write_files(const Handoff *all, size_t n)
 {
     char path[512];
     FILE *f;
 
-    snprintf(path, sizeof(path), "%s.threads.csv", cfg_prefix);
-    f = fopen(path, "w");
-    if (!f) {
-        perror(path);
-        return;
-    }
+    if (open_output(&f, "threads", path, sizeof(path)) != 0)
+        return -1;
     fprintf(f, "tid,role,group,index\n");
     for (int i = 0; i < ninfos; i++)
         fprintf(f, "%d,%s,%d,%d\n", infos[i].tid, infos[i].role, infos[i].group, infos[i].index);
-    fclose(f);
+    if (close_checked(f, path) != 0)
+        return -1;
 
-    snprintf(path, sizeof(path), "%s.handoffs.csv", cfg_prefix);
-    f = fopen(path, "w");
-    if (!f) {
-        perror(path);
-        return;
-    }
+    if (open_output(&f, "handoffs", path, sizeof(path)) != 0)
+        return -1;
     fprintf(f, "group,item_id,from_tid,to_tid,stage,put_ns,get_ns\n");
     for (size_t i = 0; i < n; i++)
         fprintf(f, "%d,%lld,%d,%d,%s,%llu,%llu\n", all[i].group, (long long)all[i].item,
                 all[i].from_tid, all[i].to_tid,
                 all[i].stage == STAGE_P2W ? "producer_to_worker" : "worker_to_sink",
                 (unsigned long long)all[i].put_ns, (unsigned long long)all[i].get_ns);
-    fclose(f);
+    return close_checked(f, path);
 }
 
 static void usage(const char *prog)
@@ -406,6 +455,10 @@ int main(int argc, char **argv)
     ThreadArg **sinks = calloc((size_t)cfg_groups, sizeof(ThreadArg *));
     ThreadArg **workers = calloc((size_t)cfg_groups * (size_t)cfg_workers, sizeof(ThreadArg *));
     int nworkers = 0;
+    if (!sinks || !workers) {
+        perror("calloc");
+        return 1;
+    }
     for (int g = 0; g < cfg_groups; g++) {
         queue_init(&groups[g].q1, cfg_qsize);
         queue_init(&groups[g].q2, cfg_qsize);
@@ -423,6 +476,10 @@ int main(int argc, char **argv)
         args[t] = (ThreadArg){ .g = &groups[g], .group = g };               /* sink */
         log_init(&args[t].log, (size_t)cfg_items);
         args[t].lat = calloc((size_t)cfg_items, sizeof(uint64_t));
+        if (!args[t].lat) {
+            perror("calloc");
+            return 1;
+        }
         sinks[g] = &args[t];
         t++;
     }
@@ -430,11 +487,11 @@ int main(int argc, char **argv)
     uint64_t start = now_ns();
     t = 0;
     for (int g = 0; g < cfg_groups; g++) {
-        pthread_create(&tids[t], NULL, producer, &args[t]);
+        spawn(&tids[t], producer, &args[t], "producer");
         t++;
         for (int w = 0; w < cfg_workers; w++, t++)
-            pthread_create(&tids[t], NULL, worker, &args[t]);
-        pthread_create(&tids[t], NULL, sink, &args[t]);
+            spawn(&tids[t], worker, &args[t], "worker");
+        spawn(&tids[t], sink, &args[t], "sink");
         t++;
     }
     for (int i = 0; i < nthreads; i++)
@@ -464,7 +521,7 @@ int main(int argc, char **argv)
 
     /* Write the ground truth only after the timed part, so logging does not
      * disturb the measurement. */
-    write_files(all, nall);
+    int write_status = write_files(all, nall);
 
     double secs = (double)(end - start) / 1e9;
     printf("groups=%d workers=%d items=%ld mode=%s period_us=%ld cost_us=%ld queue=%d\n",
@@ -474,6 +531,10 @@ int main(int argc, char **argv)
     if (nlat)
         printf("latency_ms p50=%.2f p95=%.2f p99=%.2f max=%.2f\n", pct_ms(lat, nlat, 0.50),
                pct_ms(lat, nlat, 0.95), pct_ms(lat, nlat, 0.99), pct_ms(lat, nlat, 1.0));
+    if (write_status != 0) {
+        fprintf(stderr, "error: ground-truth files were not written correctly; this run is not valid\n");
+        return 1;
+    }
     printf("handoffs=%zu files: %s.handoffs.csv %s.threads.csv\n", nall, cfg_prefix, cfg_prefix);
     return 0;
 }
