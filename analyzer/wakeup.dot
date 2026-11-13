@@ -1,0 +1,24 @@
+digraph thread_relationships {
+  rankdir=LR;
+  t233740 [label="233740"];
+  t233853 [label="233853"];
+  t233854 [label="233854"];
+  t233855 [label="233855"];
+  t233856 [label="233856"];
+  t233857 [label="233857"];
+  t233858 [label="233858"];
+  t233859 [label="233859"];
+  t233860 [label="233860"];
+  t233740 -> t233860 [style=dashed, label="1"];
+  t233853 -> t233740 [style=dashed, label="1"];
+  t233853 -> t233854 [style=solid, label="20"];
+  t233853 -> t233855 [style=solid, label="20"];
+  t233854 -> t233740 [style=dashed, label="1"];
+  t233854 -> t233856 [style=solid, label="22"];
+  t233855 -> t233856 [style=solid, label="19"];
+  t233857 -> t233858 [style=solid, label="20"];
+  t233857 -> t233859 [style=solid, label="20"];
+  t233858 -> t233860 [style=solid, label="20"];
+  t233859 -> t233740 [style=dashed, label="1"];
+  t233859 -> t233860 [style=solid, label="20"];
+}
