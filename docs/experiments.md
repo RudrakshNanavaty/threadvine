@@ -40,3 +40,19 @@ A run is `valid=yes` only if the program exited 0 **and** the ground-truth valid
     python3 bench/check_groundtruth.py PREFIX --items N --groups G --workers W
 
 Without `--items` it cannot see items missing from the end of a group; pass the same values used for the run.
+
+## Traced experiments (benchmark + collector + analyzer)
+
+`experiments/run_traced.py` runs the benchmark with the eBPF collector, infers the thread graph with both analyzer methods (`wakeup`, and the `timing` baseline) and scores each against the answer key.
+
+Setup on the VCL VM (from the repo root): `./scripts/setup-vm.sh`, `make bpf && make bench`, a virtual environment with `pip install -e ./analyzer`, and `sudo -v` (the runner never asks for a password).
+
+    python3 experiments/run_traced.py --list
+    python3 experiments/run_traced.py --configs slow_w2g2,sat_w2g2 --repeats 5
+    python3 experiments/summarize_traced.py experiments/results/traced_<time>.csv
+
+Configurations: `slow_*` has a producer slower than the workers (`-p 2000`); `sat_*` has no pause between arrivals (`-p 0`), so the queue is always full. `w1g1`, `w4g1` and `w2g2` are workers and groups; `spin` means workers burn CPU instead of sleeping. 200 items per group, 1 ms of work per item.
+
+A traced run is `valid=yes` only if the benchmark and collector exited 0, the answer key is consistent, the collector was attached before the first handoff, the trace has its END_OF_TRACE record, and no events were dropped. Each traced run is paired with an untraced run in the same round, so the summary can report collector overhead.
+
+How to read the scores: directed scores need the right direction; undirected scores accept either direction. With a saturated producer the producer waits and the workers wake it, so the wakeup method can find the right pair but in the reverse direction. Report both. Edges between groups should be 0.
