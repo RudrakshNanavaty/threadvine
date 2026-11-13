@@ -56,6 +56,8 @@ def main():
             p = f"{method}_"
             print(f"  {method:7} directed   precision {span(nums(rs, p + 'dir_precision'))}  recall {span(nums(rs, p + 'dir_recall'))}")
             print(f"  {'':7} undirected precision {span(nums(rs, p + 'undir_precision'))}  recall {span(nums(rs, p + 'undir_recall'))}")
+            print(f"  {'':7} reversed edges: mean {span(nums(rs, p + 'reversed'), 1)}  same-group worker pairs (contention): mean {span(nums(rs, p + 'contention'), 1)}  other false: {span(nums(rs, p + 'other_false'), 1)}")
+            print(f"  {'':7} undirected precision without contention pairs: {span(nums(rs, p + 'adj_undir_precision'))}")
             cg = nums(rs, p + "cross_group")
             print(f"  {'':7} edges between groups: mean {st.mean(cg):.1f}, max {max(cg):.0f}" if cg else f"  {'':7} edges between groups: n/a")
 

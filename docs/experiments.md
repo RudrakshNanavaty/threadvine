@@ -56,3 +56,5 @@ Configurations: `slow_*` has a producer slower than the workers (`-p 2000`); `sa
 A traced run is `valid=yes` only if the benchmark and collector exited 0, the answer key is consistent, the collector was attached before the first handoff, the trace has its END_OF_TRACE record, and no events were dropped. Each traced run is paired with an untraced run in the same round, so the summary can report collector overhead.
 
 How to read the scores: directed scores need the right direction; undirected scores accept either direction. With a saturated producer the producer waits and the workers wake it, so the wakeup method can find the right pair but in the reverse direction. Report both. Edges between groups should be 0.
+
+Extra columns per method: `reversed` (right pair, wrong direction), `contention` (two workers of the same group, which share the queue lock; a real dependency but not a handoff, so not in the answer key), `other_false`, and `adj_undir_precision` (undirected precision with the contention pairs left out of the count). The raw scores from the analyzer are unchanged; report both the raw and the adjusted numbers and say which is which.

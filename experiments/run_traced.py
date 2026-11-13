@@ -48,7 +48,7 @@ import run_experiments as rx  # noqa: E402
 try:
     from analyzer import timing_inference, wakeup_inference
     from analyzer.graph import InferenceSettings
-    from analyzer.scoring import score_graph
+    from analyzer.scoring import load_ground_truth, score_graph
     from analyzer.trace import load_trace
     ANALYZER_ERROR = None
 except ImportError as exc:  # typer missing, or analyzer not installed
@@ -71,7 +71,8 @@ CONFIGS = {
 }
 METHODS = ("wakeup", "timing")
 SCORE_FIELDS = ["confident", "ambiguous", "dir_precision", "dir_recall", "undir_precision",
-                "undir_recall", "dir_tp", "dir_fp", "dir_fn", "cross_group", "main_edges"]
+                "undir_recall", "dir_tp", "dir_fp", "dir_fn", "cross_group", "main_edges",
+                "reversed", "contention", "other_false", "adj_undir_precision"]
 COLUMNS = (["config", "repeat", "traced", "timestamp"] + rx.OPT_COLUMNS + ["attach_delay_s"] +
            ["elapsed_s", "throughput", "p50_ms", "p95_ms", "p99_ms", "max_ms",
             "events_recorded", "events_dropped", "trace_complete", "validation"] +
@@ -83,6 +84,38 @@ def fmt(value):
     return "" if value is None else (f"{value:.4f}" if isinstance(value, float) else value)
 
 
+def classify(confident_edges, threads, true_edges):
+    """Split confident edges into: true (right pair, right direction), reversed (right pair,
+    wrong direction), contention (two workers of the SAME group: they share the queue lock, a
+    real dependency but not a handoff, so not in the answer key), cross_group, main, other.
+    `threads` maps tid -> object with .role and .group; `true_edges` is a set of (from, to)."""
+    true_pairs = {frozenset(e) for e in true_edges}
+    out = dict(true=0, reversed=0, contention=0, cross_group=0, main=0, other=0)
+    contention_pairs, all_pairs = set(), set()
+    for a, b in confident_edges:
+        all_pairs.add(frozenset((a, b)))
+        ta, tb = threads.get(a), threads.get(b)
+        if (a, b) in true_edges:
+            out["true"] += 1
+        elif frozenset((a, b)) in true_pairs:
+            out["reversed"] += 1
+        elif ta is None or tb is None:
+            out["other"] += 1
+        elif "main" in (ta.role, tb.role):
+            out["main"] += 1
+        elif ta.group != tb.group:
+            out["cross_group"] += 1
+        elif ta.role == tb.role == "worker":
+            out["contention"] += 1
+            contention_pairs.add(frozenset((a, b)))
+        else:
+            out["other"] += 1
+    tp_pairs = len(all_pairs & true_pairs)
+    denominator = len(all_pairs) - len(contention_pairs)
+    out["adj_undir_precision"] = tp_pairs / denominator if denominator else None
+    return out
+
+
 def analyze(trace_path, prefix):
     """Infer with both methods and score. Returns (fields dict, trace-loss dict)."""
     trace = load_trace(trace_path)
@@ -90,6 +123,9 @@ def analyze(trace_path, prefix):
     for method, module in (("wakeup", wakeup_inference), ("timing", timing_inference)):
         graph = module.infer(trace, InferenceSettings(method=method))
         rep = score_graph(graph, prefix)
+        threads, true_edges = load_ground_truth(prefix)
+        cls = classify([(e.source_thread_identifier, e.destination_thread_identifier)
+                        for e in graph.edges if e.confidence == "confident"], threads, true_edges)
         loss = {"recorded": graph.metadata.recorded_event_count,
                 "dropped": graph.metadata.dropped_event_count,
                 "complete": graph.metadata.has_end_of_trace}
@@ -99,7 +135,9 @@ def analyze(trace_path, prefix):
                       dir_tp=rep.directed_true_positives, dir_fp=rep.directed_false_positives,
                       dir_fn=rep.directed_false_negatives,
                       cross_group=rep.cross_group_confident_edge_count,
-                      main_edges=rep.main_confident_edge_count)
+                      main_edges=rep.main_confident_edge_count, reversed=cls["reversed"],
+                      contention=cls["contention"], other_false=cls["other"],
+                      adj_undir_precision=cls["adj_undir_precision"])
         for f in SCORE_FIELDS:
             fields[f"{method}_{f}"] = fmt(values[f])
     return fields, loss
