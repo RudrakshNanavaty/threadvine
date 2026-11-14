@@ -29,7 +29,7 @@ from analyzer.graph import (
     write_graph_dot,
     write_graph_json,
 )
-from analyzer.scoring import format_score_report, score_graph
+from analyzer.scoring import format_score_report, score_graph, write_scored_graph_dot
 from analyzer.trace import prepare_trace
 
 app = typer.Typer(
@@ -133,11 +133,23 @@ def score(
         str,
         typer.Option(help="Prefix of the benchmark ground-truth CSV files"),
     ],
+    dot: Annotated[
+        Path | None,
+        typer.Option(
+            help=(
+                "Also write a Graphviz DOT figure coloured by the score: "
+                "true positive green, false positive red, missed edge dashed grey"
+            ),
+        ),
+    ] = None,
 ) -> int:
     """Score a graph against ground truth."""
     loaded_graph = load_graph_json(str(graph))
     report = score_graph(loaded_graph, groundtruth)
     print(format_score_report(report))
+    if dot is not None:
+        write_scored_graph_dot(loaded_graph, report, str(dot))
+        print(f"wrote {dot}")
     return 0
 
 
@@ -170,6 +182,12 @@ def compare(
         Path | None,
         typer.Option("--csv", help="Write the per-run rows to this CSV file"),
     ] = None,
+    dot_directory: Annotated[
+        Path | None,
+        typer.Option(
+            help="Write one score-coloured DOT file per run and method into this directory",
+        ),
+    ] = None,
 ) -> int:
     """Run wakeup and timing on every manifest row and print a Markdown table."""
     if timing_windows is None:
@@ -181,6 +199,13 @@ def compare(
     if csv_path is not None:
         write_results_csv(results, str(csv_path))
         print(f"\nwrote {csv_path}", file=sys.stderr)
+    if dot_directory is not None:
+        dot_directory.mkdir(parents=True, exist_ok=True)
+        for result in results:
+            trace_stem = Path(result.trace_path).name.removesuffix(".events.bin")
+            dot_path = dot_directory / f"{result.workload}__{trace_stem}__{result.method_label}.dot"
+            write_scored_graph_dot(result.graph, result.report, str(dot_path))
+        print(f"wrote DOT files to {dot_directory}", file=sys.stderr)
     return 0
 
 

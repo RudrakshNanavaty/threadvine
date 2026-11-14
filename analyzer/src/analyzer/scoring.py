@@ -20,7 +20,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, field
 
-from analyzer.graph import Graph
+from analyzer.graph import Graph, write_graph_dot
 
 
 @dataclass
@@ -55,6 +55,7 @@ class ScoreReport:
     # Usually join/teardown noise if non-zero and confident.
     main_confident_edge_count: int
     missed_edges: list[tuple[int, int]] = field(default_factory=list)
+    true_positive_edges: list[tuple[int, int]] = field(default_factory=list)
     false_positive_edges: list[tuple[int, int]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     threads: dict[int, ThreadInfo] = field(default_factory=dict)
@@ -146,9 +147,21 @@ def score_graph(graph: Graph, ground_truth_prefix: str) -> ScoreReport:
         cross_group_confident_edge_count=cross_group,
         main_confident_edge_count=involving_main,
         missed_edges=sorted(true_edges - confident),
+        true_positive_edges=sorted(confident & true_edges),
         false_positive_edges=sorted(confident - true_edges),
         warnings=graph.loss_warnings(),
         threads=threads,
+    )
+
+
+def write_scored_graph_dot(graph: Graph, report: ScoreReport, path: str) -> None:
+    """Write the DOT figure coloured by the same ``ScoreReport`` the tables use."""
+    write_graph_dot(
+        graph,
+        path,
+        true_positive_edges=set(report.true_positive_edges),
+        false_positive_edges=set(report.false_positive_edges),
+        missed_edges=set(report.missed_edges),
     )
 
 

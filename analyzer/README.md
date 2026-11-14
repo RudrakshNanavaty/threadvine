@@ -59,6 +59,16 @@ manifest's directory.
 
 Frozen timing window: _not yet chosen_ — set after the calibration sweep on the VM.
 
+## Score-coloured figures
+
+```bash
+uv run analyzer score graph.json --groundtruth P --dot scored.dot
+uv run analyzer compare manifest.csv --dot-directory figures/
+```
+
+Confident edges are green when true and red when false; true edges the graph missed are
+drawn dashed grey. Colours come from the same `score_graph` result as the tables.
+
 ## Methods
 
 | Method | Evidence | Notes |

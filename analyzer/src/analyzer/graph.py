@@ -268,13 +268,37 @@ def load_graph_json(path: str) -> Graph:
     return Graph(metadata=metadata, threads=threads, edges=edges)
 
 
-def write_graph_dot(graph: Graph, path: str) -> None:
+def write_graph_dot(
+    graph: Graph,
+    path: str,
+    true_positive_edges: set[tuple[int, int]] | None = None,
+    false_positive_edges: set[tuple[int, int]] | None = None,
+    missed_edges: set[tuple[int, int]] | None = None,
+) -> None:
     """Write Graphviz DOT: solid confident edges, dashed ambiguous edges.
+
+    When the three score sets are given (taken from ``ScoreReport``), confident
+    edges are coloured: true positive green, false positive red. True edges the
+    graph missed are added as dashed grey edges. Without them the output is the
+    plain uncoloured graph.
 
     Render with e.g. ``dot -Tpng graph.dot -o graph.png``.
     """
+    colour_by_score = (
+        true_positive_edges is not None
+        or false_positive_edges is not None
+        or missed_edges is not None
+    )
+    true_positive_edges = true_positive_edges or set()
+    false_positive_edges = false_positive_edges or set()
+    missed_edges = missed_edges or set()
+
+    thread_ids = set(graph.threads)
+    for source, destination in missed_edges:
+        thread_ids.update((source, destination))
+
     lines = ["digraph thread_relationships {", "  rankdir=LR;"]
-    for thread_id in sorted(graph.threads):
+    for thread_id in sorted(thread_ids):
         lines.append(f'  t{thread_id} [label="{thread_id}"];')
     for edge in sorted(
         graph.edges,
@@ -288,9 +312,21 @@ def write_graph_dot(graph: Graph, path: str) -> None:
             label_count = edge.timing_count
         else:
             label_count = edge.wakeup_count
+        edge_pair = (edge.source_thread_id, edge.destination_thread_id)
+        colour = ""
+        if colour_by_score:
+            if edge_pair in true_positive_edges:
+                colour = ', color="green3", fontcolor="green3"'
+            elif edge_pair in false_positive_edges:
+                colour = ', color="red", fontcolor="red"'
         lines.append(
             f"  t{edge.source_thread_id} -> t{edge.destination_thread_id} "
-            f'[style={style}, label="{label_count}"];'
+            f'[style={style}, label="{label_count}"{colour}];'
+        )
+    for source, destination in sorted(missed_edges):
+        lines.append(
+            f"  t{source} -> t{destination} "
+            '[style=dashed, color="grey", fontcolor="grey", label="missed"];'
         )
     lines.append("}")
     with open(path, "w") as output_file:
