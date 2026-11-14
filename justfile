@@ -36,3 +36,8 @@ score *args: sync
 # Example: just compare manifest.csv --timing-windows 25,50,100,250,500,1000 --csv runs.csv
 compare *args: sync
     uv run analyzer compare {{args}}
+
+# Print a thread-to-CPU plan from a wakeup graph.
+# Example: just plan wakeup.json --cpus 4
+plan *args: sync
+    uv run analyzer plan {{args}}
