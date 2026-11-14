@@ -58,3 +58,18 @@ A traced run is `valid=yes` only if the benchmark and collector exited 0, the an
 How to read the scores: directed scores need the right direction; undirected scores accept either direction. With a saturated producer the producer waits and the workers wake it, so the wakeup method can find the right pair but in the reverse direction. Report both. Edges between groups should be 0.
 
 Extra columns per method: `reversed` (right pair, wrong direction), `contention` (two workers of the same group, which share the queue lock; a real dependency but not a handoff, so not in the answer key), `other_false`, and `adj_undir_precision` (undirected precision with the contention pairs left out of the count). The raw scores from the analyzer are unchanged; report both the raw and the adjusted numbers and say which is which.
+
+## Pinning threads to CPUs
+
+`experiments/apply_plan.py` pins the threads of a running process to CPUs, using `os.sched_setaffinity` on each thread under `/proc/<pid>/task`. It needs Linux and a live process.
+
+    python3 experiments/apply_plan.py <pid> --strategy default
+    python3 experiments/apply_plan.py <pid> --strategy round-robin --cpus 4
+    python3 experiments/apply_plan.py <pid> --strategy plan --plan plan.json
+    python3 experiments/apply_plan.py <pid> --strategy plan --plan plan.json --dry-run
+
+Strategies: `default` changes nothing; `round-robin` gives the sorted thread ids CPUs 0, 1, 2, ... in turn; `plan` reads a plan file made by `analyzer plan`. `--dry-run` prints what would be pinned without changing anything.
+
+Plan file format: `{"cpu_count": 4, "assignments": {"<tid>": [0, 1]}, "unpinned": [<tid>]}`. Threads in `unpinned` (in practice the main thread) are left alone. The script warns about threads in the process that are not in the plan, and about plan threads that are not in the process. It exits 0 if every pin worked, 1 if any failed, and 2 for bad input such as a missing process or a CPU the machine does not have.
+
+Check the result with `taskset -cp <tid>`.
