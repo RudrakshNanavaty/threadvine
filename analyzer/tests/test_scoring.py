@@ -20,7 +20,7 @@ def _empty_metadata(**overrides) -> GraphMetadata:
         minimum_fraction=0.05,
         timing_window_us=None,
         trace_path='test.jsonl',
-        target_process_identifier=100,
+        target_pid=100,
         recorded_event_count=10,
         dropped_event_count=0,
         has_end_of_trace=True,

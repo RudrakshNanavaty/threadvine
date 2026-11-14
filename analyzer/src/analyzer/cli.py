@@ -1,4 +1,4 @@
-"""Command-line interface: ``infer`` and ``score`` subcommands.
+"""Command-line interface: ``infer``, ``score``, ``compare`` and ``plan`` subcommands.
 
 ``infer`` never opens ground-truth files. ``score`` never opens a raw trace.
 That split is intentional: relationship discovery must not peek at the answer
@@ -7,6 +7,7 @@ key (see ``docs/ground-truth-format.md``).
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Annotated, Literal
@@ -14,6 +15,13 @@ from typing import Annotated, Literal
 import typer
 
 from analyzer import timing_inference, wakeup_inference
+from analyzer.compare import (
+    DEFAULT_TIMING_WINDOW_US,
+    format_comparison_table,
+    read_manifest,
+    run_comparison,
+    write_results_csv,
+)
 from analyzer.graph import (
     DEFAULT_MINIMUM_COUNT,
     DEFAULT_MINIMUM_FRACTION,
@@ -22,8 +30,9 @@ from analyzer.graph import (
     write_graph_dot,
     write_graph_json,
 )
-from analyzer.scoring import format_score_report, score_graph
-from analyzer.trace import load_trace
+from analyzer.plan import build_plan
+from analyzer.scoring import format_score_report, score_graph, write_scored_graph_dot
+from analyzer.trace import prepare_trace
 
 app = typer.Typer(
     help="Infer and score thread relationship graphs from collector traces.",
@@ -49,8 +58,7 @@ def infer(
         Path | None,
         typer.Option(
             help=(
-                "Graphviz DOT output path "
-                "(default: same stem as --output with .dot)"
+                "Graphviz DOT output path (default: same stem as --output with .dot)"
             ),
         ),
     ] = None,
@@ -79,7 +87,7 @@ def infer(
                 "Timing method: block-to-switch-in window in microseconds (default 100)"
             ),
         ),
-    ] = 100,
+    ] = DEFAULT_TIMING_WINDOW_US,
 ) -> int:
     """Infer a graph from a collector trace."""
     settings = InferenceSettings(
@@ -88,18 +96,18 @@ def infer(
         minimum_fraction=minimum_fraction,
         timing_window_us=timing_window_us,
     )
-    loaded_trace = load_trace(str(trace))
+    prepared_trace = prepare_trace(str(trace))
     if method == "wakeup":
-        graph = wakeup_inference.infer(loaded_trace, settings)
+        graph = wakeup_inference.infer(prepared_trace, settings)
     else:
-        graph = timing_inference.infer(loaded_trace, settings)
+        graph = timing_inference.infer(prepared_trace, settings)
 
     # Lossy traces still produce a graph; warnings travel into score via metadata.
     for warning in graph.loss_warnings():
         print(f"WARNING: {warning}", file=sys.stderr)
-    if loaded_trace.outside_process_event_count:
+    if prepared_trace.outside_process_event_count:
         print(
-            f"note: dropped {loaded_trace.outside_process_event_count} events involving "
+            f"note: dropped {prepared_trace.outside_process_event_count} events involving "
             "threads outside the target process",
             file=sys.stderr,
         )
@@ -127,11 +135,96 @@ def score(
         str,
         typer.Option(help="Prefix of the benchmark ground-truth CSV files"),
     ],
+    dot: Annotated[
+        Path | None,
+        typer.Option(
+            help=(
+                "Also write a Graphviz DOT figure coloured by the score: "
+                "true positive green, false positive red, missed edge dashed grey"
+            ),
+        ),
+    ] = None,
 ) -> int:
     """Score a graph against ground truth."""
     loaded_graph = load_graph_json(str(graph))
     report = score_graph(loaded_graph, groundtruth)
     print(format_score_report(report))
+    if dot is not None:
+        write_scored_graph_dot(loaded_graph, report, str(dot))
+        print(f"wrote {dot}")
+    return 0
+
+
+@app.command()
+def compare(
+    manifest: Annotated[
+        Path,
+        typer.Argument(
+            help=(
+                "CSV with columns workload, trace_path, groundtruth_prefix; "
+                "one row per run, repeats share a workload name"
+            ),
+        ),
+    ],
+    timing_window_us: Annotated[
+        int,
+        typer.Option(help="Timing method: block-to-switch-in window in microseconds"),
+    ] = DEFAULT_TIMING_WINDOW_US,
+    timing_windows: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "Comma-separated timing windows in microseconds (for example "
+                "25,50,100,250,500,1000); emits one timing row per window and "
+                "overrides --timing-window-us"
+            ),
+        ),
+    ] = None,
+    csv_path: Annotated[
+        Path | None,
+        typer.Option("--csv", help="Write the per-run rows to this CSV file"),
+    ] = None,
+    dot_directory: Annotated[
+        Path | None,
+        typer.Option(
+            help="Write one score-coloured DOT file per run and method into this directory",
+        ),
+    ] = None,
+) -> int:
+    """Run wakeup and timing on every manifest row and print a Markdown table."""
+    if timing_windows is None:
+        window_list = [timing_window_us]
+    else:
+        window_list = [int(part) for part in timing_windows.split(",") if part.strip()]
+    results = run_comparison(read_manifest(str(manifest)), window_list)
+    print(format_comparison_table(results))
+    if csv_path is not None:
+        write_results_csv(results, str(csv_path))
+        print(f"\nwrote {csv_path}", file=sys.stderr)
+    if dot_directory is not None:
+        dot_directory.mkdir(parents=True, exist_ok=True)
+        for result in results:
+            trace_stem = Path(result.trace_path).name.removesuffix(".events.bin")
+            dot_path = dot_directory / f"{result.workload}__{trace_stem}__{result.method_label}.dot"
+            write_scored_graph_dot(result.graph, result.report, str(dot_path))
+        print(f"wrote DOT files to {dot_directory}", file=sys.stderr)
+    return 0
+
+
+@app.command()
+def plan(
+    graph: Annotated[
+        Path,
+        typer.Argument(help="Wakeup graph.json produced by infer"),
+    ],
+    cpus: Annotated[
+        int,
+        typer.Option(help="Number of CPUs available for placement"),
+    ],
+) -> int:
+    """Print a JSON thread-to-CPU plan: one disjoint CPU block per confident group."""
+    placement_plan = build_plan(load_graph_json(str(graph)), cpus)
+    print(json.dumps(placement_plan, indent=2))
     return 0
 
 
