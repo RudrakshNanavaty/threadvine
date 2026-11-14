@@ -1,4 +1,4 @@
-"""Command-line interface: ``infer`` and ``score`` subcommands.
+"""Command-line interface: ``infer``, ``score`` and ``compare`` subcommands.
 
 ``infer`` never opens ground-truth files. ``score`` never opens a raw trace.
 That split is intentional: relationship discovery must not peek at the answer
@@ -14,6 +14,13 @@ from typing import Annotated, Literal
 import typer
 
 from analyzer import timing_inference, wakeup_inference
+from analyzer.compare import (
+    DEFAULT_TIMING_WINDOW_US,
+    format_comparison_table,
+    read_manifest,
+    run_comparison,
+    write_results_csv,
+)
 from analyzer.graph import (
     DEFAULT_MINIMUM_COUNT,
     DEFAULT_MINIMUM_FRACTION,
@@ -22,7 +29,7 @@ from analyzer.graph import (
     write_graph_dot,
     write_graph_json,
 )
-from analyzer.scoring import format_score_report, score_graph
+from analyzer.scoring import format_score_report, score_graph, write_scored_graph_dot
 from analyzer.trace import prepare_trace
 
 app = typer.Typer(
@@ -78,7 +85,7 @@ def infer(
                 "Timing method: block-to-switch-in window in microseconds (default 100)"
             ),
         ),
-    ] = 100,
+    ] = DEFAULT_TIMING_WINDOW_US,
 ) -> int:
     """Infer a graph from a collector trace."""
     settings = InferenceSettings(
@@ -126,11 +133,79 @@ def score(
         str,
         typer.Option(help="Prefix of the benchmark ground-truth CSV files"),
     ],
+    dot: Annotated[
+        Path | None,
+        typer.Option(
+            help=(
+                "Also write a Graphviz DOT figure coloured by the score: "
+                "true positive green, false positive red, missed edge dashed grey"
+            ),
+        ),
+    ] = None,
 ) -> int:
     """Score a graph against ground truth."""
     loaded_graph = load_graph_json(str(graph))
     report = score_graph(loaded_graph, groundtruth)
     print(format_score_report(report))
+    if dot is not None:
+        write_scored_graph_dot(loaded_graph, report, str(dot))
+        print(f"wrote {dot}")
+    return 0
+
+
+@app.command()
+def compare(
+    manifest: Annotated[
+        Path,
+        typer.Argument(
+            help=(
+                "CSV with columns workload, trace_path, groundtruth_prefix; "
+                "one row per run, repeats share a workload name"
+            ),
+        ),
+    ],
+    timing_window_us: Annotated[
+        int,
+        typer.Option(help="Timing method: block-to-switch-in window in microseconds"),
+    ] = DEFAULT_TIMING_WINDOW_US,
+    timing_windows: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "Comma-separated timing windows in microseconds (for example "
+                "25,50,100,250,500,1000); emits one timing row per window and "
+                "overrides --timing-window-us"
+            ),
+        ),
+    ] = None,
+    csv_path: Annotated[
+        Path | None,
+        typer.Option("--csv", help="Write the per-run rows to this CSV file"),
+    ] = None,
+    dot_directory: Annotated[
+        Path | None,
+        typer.Option(
+            help="Write one score-coloured DOT file per run and method into this directory",
+        ),
+    ] = None,
+) -> int:
+    """Run wakeup and timing on every manifest row and print a Markdown table."""
+    if timing_windows is None:
+        window_list = [timing_window_us]
+    else:
+        window_list = [int(part) for part in timing_windows.split(",") if part.strip()]
+    results = run_comparison(read_manifest(str(manifest)), window_list)
+    print(format_comparison_table(results))
+    if csv_path is not None:
+        write_results_csv(results, str(csv_path))
+        print(f"\nwrote {csv_path}", file=sys.stderr)
+    if dot_directory is not None:
+        dot_directory.mkdir(parents=True, exist_ok=True)
+        for result in results:
+            trace_stem = Path(result.trace_path).name.removesuffix(".events.bin")
+            dot_path = dot_directory / f"{result.workload}__{trace_stem}__{result.method_label}.dot"
+            write_scored_graph_dot(result.graph, result.report, str(dot_path))
+        print(f"wrote DOT files to {dot_directory}", file=sys.stderr)
     return 0
 
 

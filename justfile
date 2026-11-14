@@ -30,3 +30,9 @@ infer *args: sync
 # Example: just score analyzer/wakeup.json --groundtruth groundtruth
 score *args: sync
     uv run analyzer score {{args}}
+
+# Compare wakeup vs timing across runs listed in a manifest CSV.
+# Manifest columns: workload,trace_path,groundtruth_prefix
+# Example: just compare manifest.csv --timing-windows 25,50,100,250,500,1000 --csv runs.csv
+compare *args: sync
+    uv run analyzer compare {{args}}
