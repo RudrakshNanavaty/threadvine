@@ -1,4 +1,4 @@
-"""Command-line interface: ``infer`` and ``score`` subcommands.
+"""Command-line interface: ``infer``, ``score`` and ``compare`` subcommands.
 
 ``infer`` never opens ground-truth files. ``score`` never opens a raw trace.
 That split is intentional: relationship discovery must not peek at the answer
@@ -14,6 +14,13 @@ from typing import Annotated, Literal
 import typer
 
 from analyzer import timing_inference, wakeup_inference
+from analyzer.compare import (
+    DEFAULT_TIMING_WINDOW_US,
+    format_comparison_table,
+    read_manifest,
+    run_comparison,
+    write_results_csv,
+)
 from analyzer.graph import (
     DEFAULT_MINIMUM_COUNT,
     DEFAULT_MINIMUM_FRACTION,
@@ -78,7 +85,7 @@ def infer(
                 "Timing method: block-to-switch-in window in microseconds (default 100)"
             ),
         ),
-    ] = 100,
+    ] = DEFAULT_TIMING_WINDOW_US,
 ) -> int:
     """Infer a graph from a collector trace."""
     settings = InferenceSettings(
@@ -131,6 +138,49 @@ def score(
     loaded_graph = load_graph_json(str(graph))
     report = score_graph(loaded_graph, groundtruth)
     print(format_score_report(report))
+    return 0
+
+
+@app.command()
+def compare(
+    manifest: Annotated[
+        Path,
+        typer.Argument(
+            help=(
+                "CSV with columns workload, trace_path, groundtruth_prefix; "
+                "one row per run, repeats share a workload name"
+            ),
+        ),
+    ],
+    timing_window_us: Annotated[
+        int,
+        typer.Option(help="Timing method: block-to-switch-in window in microseconds"),
+    ] = DEFAULT_TIMING_WINDOW_US,
+    timing_windows: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "Comma-separated timing windows in microseconds (for example "
+                "25,50,100,250,500,1000); emits one timing row per window and "
+                "overrides --timing-window-us"
+            ),
+        ),
+    ] = None,
+    csv_path: Annotated[
+        Path | None,
+        typer.Option("--csv", help="Write the per-run rows to this CSV file"),
+    ] = None,
+) -> int:
+    """Run wakeup and timing on every manifest row and print a Markdown table."""
+    if timing_windows is None:
+        window_list = [timing_window_us]
+    else:
+        window_list = [int(part) for part in timing_windows.split(",") if part.strip()]
+    results = run_comparison(read_manifest(str(manifest)), window_list)
+    print(format_comparison_table(results))
+    if csv_path is not None:
+        write_results_csv(results, str(csv_path))
+        print(f"\nwrote {csv_path}", file=sys.stderr)
     return 0
 
 

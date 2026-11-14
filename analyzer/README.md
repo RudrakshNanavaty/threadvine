@@ -45,6 +45,20 @@ uv run analyzer infer traced_run.events.bin --method wakeup -o analyzer/wakeup.j
 uv run analyzer score analyzer/wakeup.json --groundtruth groundtruth
 ```
 
+## Comparing methods
+
+```bash
+# manifest.csv columns: workload,trace_path,groundtruth_prefix (repeats share a workload)
+uv run analyzer compare manifest.csv --csv runs.csv
+uv run analyzer compare manifest.csv --timing-windows 25,50,100,250,500,1000   # window sweep
+```
+
+`compare` runs wakeup and timing with the same frozen thresholds and prints a Markdown
+table (mean and min-max over repeats). Relative manifest paths resolve against the
+manifest's directory.
+
+Frozen timing window: _not yet chosen_ — set after the calibration sweep on the VM.
+
 ## Methods
 
 | Method | Evidence | Notes |
