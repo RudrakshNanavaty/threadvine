@@ -36,15 +36,16 @@ the waker, the thread calling futex, the reader or writer, and so on.
 | --- | --- | --- | --- | --- |
 | 1 | `EVENT_TYPE_SCHEDULER_SWITCH` | `scheduler_switch` | `previous_thread_identifier` (`u32`), `next_thread_identifier` (`u32`), `previous_thread_state` (`u64`) | yes |
 | 2 | `EVENT_TYPE_SCHEDULER_WAKING` | `scheduler_waking` | `woken_thread_identifier` (`u32`), `woken_process_identifier` (`u32`) | yes |
-| 3 | `EVENT_TYPE_FUTEX_ENTER` | `futex_enter` | `futex_address` (`u64`), `futex_operation` (`u32`) | not yet |
-| 4 | `EVENT_TYPE_FUTEX_EXIT` | `futex_exit` | `return_value` (`s64`) | not yet |
+| 3 | `EVENT_TYPE_FUTEX_ENTER` | `futex_enter` | `futex_address` (`u64`), `futex_operation` (`u32`) | yes |
+| 4 | `EVENT_TYPE_FUTEX_EXIT` | `futex_exit` | `return_value` (`s64`) | yes |
 | 5 | `EVENT_TYPE_PIPE_OR_SOCKET_READ` | `pipe_or_socket` | `inode_number` (`u64`), `file_descriptor` (`s32`), `byte_count_or_negative_error` (`s32`) | not yet |
 | 6 | `EVENT_TYPE_PIPE_OR_SOCKET_WRITE` | `pipe_or_socket` | same as read | not yet |
 | 7 | `EVENT_TYPE_THREAD_NAME` | `thread_name` | `thread_name` (`char[16]`) | not yet |
 | 0xFFFF | `EVENT_TYPE_END_OF_TRACE` | `end_of_trace` | `recorded_event_count` (`u64`), `dropped_event_count` (`u64`) | yes (`--output` file only) |
 
 Types marked "not yet" are part of the contract so the analyzer can be built
-against them, but the collector does not produce them yet.
+against them, but the collector does not produce them yet. Types marked "yes"
+are emitted by the collector.
 
 ### Scheduler switch
 
@@ -65,10 +66,37 @@ woken thread's CPU, where the current task is not the waker.
 
 ### Futex enter and exit
 
-`futex_operation` is the futex command masked with `FUTEX_CMD_MASK`.
-`futex_address` identifies the same lock or condition variable across threads,
-since threads share one address space. An exit pairs with the enter from the
-same `thread_identifier`.
+Recorded from the `syscalls:sys_enter_futex` and `syscalls:sys_exit_futex`
+tracepoints, which run in the calling thread's context, so `thread_identifier`
+/ `process_identifier` are the caller's.
+
+`futex_operation` is the futex command masked with `FUTEX_CMD_MASK`, which
+removes the private and clock-realtime flags. `futex_address` identifies the
+same lock or condition variable across threads, since threads share one
+address space. It is the first argument of the call (`uaddr`); for requeue
+commands it is the source address, and the target address is not recorded.
+`return_value` is the raw syscall result: for wait commands, `0` means the
+thread was woken (or woke spuriously) and a negative error number means it did
+not block or timed out (`-11` `EAGAIN`: the word no longer held the expected
+value, `-110` `ETIMEDOUT`, `-4` `EINTR`); for wake commands it is the number of
+threads woken (`0` if nobody was waiting).
+
+Only coordination commands are recorded: `FUTEX_WAIT` (0), `FUTEX_WAKE` (1),
+`FUTEX_REQUEUE` (3), `FUTEX_CMP_REQUEUE` (4), `FUTEX_WAKE_OP` (5),
+`FUTEX_WAIT_BITSET` (9) and `FUTEX_WAKE_BITSET` (10). The priority-inheritance
+family and `FUTEX_FD` are skipped. The `futex_waitv` and the newer
+`futex_wait` / `futex_wake` / `futex_requeue` system calls (kernel 6.7+) are
+separate tracepoints and are not traced.
+
+An exit is only emitted for a call whose enter was recorded, so every exit
+pairs with the closest earlier enter from the same `thread_identifier`. A
+call already in progress when tracing starts, or whose enter was dropped
+because the ring buffer was full, produces no exit. A thread that dies inside
+`futex()` (for example on `exit_group`) produces an enter without an exit. A
+wait can stay inside the call for a long time, so the exit can come much later
+than the enter and, because the ring buffer is shared by all CPUs, can appear
+earlier in the file than other events with smaller timestamps: pair by
+timestamp after sorting, not by file position.
 
 ### Pipe or socket read and write
 
@@ -104,7 +132,8 @@ analysis.
 - The loader prints `events: N dropped: M` to stderr on exit.
 - Filtering happens in the kernel: `target_tgid` (rodata, `0` = no filter)
   keeps only events where the actor or the other thread involved (next thread
-  on a switch, woken thread on a wakeup) belongs to that process. The
+  on a switch, woken thread on a wakeup) belongs to that process. Futex events
+  are kept only when the calling thread belongs to that process. The
   collector's own process (`self_tgid`) is always excluded, because reading
   the ring buffer wakes the collector and would otherwise feed back into
   the event stream.

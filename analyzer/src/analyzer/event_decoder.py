@@ -43,7 +43,8 @@ PIPE_OR_SOCKET_FIELDS = (
     "byte_count_or_negative_error",
 )
 # event_type value -> (name, payload member, payload struct format, payload field names).
-# Types the collector does not emit yet are still listed so .jsonl fixtures can use them.
+# Pipe, socket and thread-name types are not emitted by the collector yet; they are
+# still listed so .jsonl fixtures can use them.
 EVENT_TYPES = {
     1: (
         "EVENT_TYPE_SCHEDULER_SWITCH",
@@ -87,6 +88,20 @@ EVENT_TYPES = {
         "<QQ",
         ("recorded_event_count", "dropped_event_count"),
     ),
+}
+
+
+# futex_operation value -> kernel name (without the FUTEX_ prefix). These are the
+# commands the collector keeps; see the comment above is_coordination_futex_operation
+# in bpf/collector.bpf.c.
+FUTEX_OPERATION_NAMES = {
+    0: "WAIT",
+    1: "WAKE",
+    3: "REQUEUE",
+    4: "CMP_REQUEUE",
+    5: "WAKE_OP",
+    9: "WAIT_BITSET",
+    10: "WAKE_BITSET",
 }
 
 
@@ -197,9 +212,14 @@ def main():
         sys.exit(f"usage: {sys.argv[0]} TRACE_FILE")
 
     path = sys.argv[1]
-    # Counters for each event type and each (waker, woken) wakeup pair.
+    # Counters for each event type, wakeup pair, futex address/operation, and futex return value.
     event_type_counts = collections.Counter()
     wakeup_pair_counts = collections.Counter()
+    futex_address_operation_counts = collections.Counter()
+    futex_return_value_counts = collections.Counter()
+    # Per thread, compared as totals because file order is not timestamp order.
+    futex_enter_counts = collections.Counter()
+    futex_exit_counts = collections.Counter()
     end_of_trace = None
 
     for event in read_events(path):
@@ -207,6 +227,19 @@ def main():
         if event["event_type"] == "EVENT_TYPE_SCHEDULER_WAKING":
             woken = event["scheduler_waking"]["woken_thread_id"]
             wakeup_pair_counts[(event["thread_id"], woken)] += 1
+
+        elif event["event_type"] == "EVENT_TYPE_FUTEX_ENTER":
+            futex_enter = event["futex_enter"]
+            operation = futex_enter["futex_operation"]
+            operation_name = FUTEX_OPERATION_NAMES.get(operation, str(operation))
+            futex_address_operation_counts[
+                (futex_enter["futex_address"], operation_name)
+            ] += 1
+            futex_enter_counts[event["thread_id"]] += 1
+
+        elif event["event_type"] == "EVENT_TYPE_FUTEX_EXIT":
+            futex_exit_counts[event["thread_id"]] += 1
+            futex_return_value_counts[event["futex_exit"]["return_value"]] += 1
 
         elif event["event_type"] == "EVENT_TYPE_END_OF_TRACE":
             end_of_trace = event["end_of_trace"]
@@ -228,6 +261,29 @@ def main():
 
     for (waker, woken), count in wakeup_pair_counts.most_common(5):
         print(f"{count:>10}  {waker} -> {woken}")
+
+    if futex_address_operation_counts or futex_return_value_counts:
+        print("top futex addresses (calls, address, operation):")
+        for (
+            address,
+            operation_name,
+        ), count in futex_address_operation_counts.most_common(5):
+            print(f"{count:>10}  0x{address:x} {operation_name}")
+
+        print("futex return values (calls, value):")
+
+        for return_value, count in sorted(futex_return_value_counts.items()):
+            print(f"{count:>10}  {return_value}")
+
+        unmatched_futex_exit_count = sum(
+            max(0, exits - futex_enter_counts[thread])
+            for thread, exits in futex_exit_counts.items()
+        )
+
+        if unmatched_futex_exit_count:
+            print(
+                f"WARNING: {unmatched_futex_exit_count} futex exit(s) without an enter"
+            )
 
 
 if __name__ == "__main__":

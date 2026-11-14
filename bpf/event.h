@@ -11,9 +11,9 @@
 enum event_type {
     EVENT_TYPE_SCHEDULER_SWITCH = 1,
     EVENT_TYPE_SCHEDULER_WAKING = 2,
-    /* Defined as part of the contract, not yet emitted by the collector: */
     EVENT_TYPE_FUTEX_ENTER = 3,
     EVENT_TYPE_FUTEX_EXIT = 4,
+    /* Defined as part of the contract, not yet emitted by the collector: */
     EVENT_TYPE_PIPE_OR_SOCKET_READ = 5,
     EVENT_TYPE_PIPE_OR_SOCKET_WRITE = 6,
     EVENT_TYPE_THREAD_NAME = 7,

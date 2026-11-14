@@ -1,4 +1,4 @@
-// Collector loader: streams sched_switch and sched_waking events.
+// Collector loader: streams sched_switch, sched_waking and futex events.
 //
 // Usage: collector [--output FILE] [target_tgid]
 //   target_tgid    only events involving this process (0 or omitted: no filter).
@@ -57,6 +57,24 @@ static const char *state_str(__u64 state, char *buf, size_t len)
     }
 }
 
+/* Name of a futex command (kernel spelling, without the FUTEX_ prefix); the raw
+ * number for any other value. These are the commands the collector keeps. */
+static const char *futex_operation_name(__u32 futex_operation, char *buf, size_t len)
+{
+    switch (futex_operation) {
+    case 0:  return "WAIT";
+    case 1:  return "WAKE";
+    case 3:  return "REQUEUE";
+    case 4:  return "CMP_REQUEUE";
+    case 5:  return "WAKE_OP";
+    case 9:  return "WAIT_BITSET";
+    case 10: return "WAKE_BITSET";
+    default:
+        snprintf(buf, len, "%u", futex_operation);
+        return buf;
+    }
+}
+
 static int handle_event(void *ctx, void *data, size_t data_sz)
 {
     const struct event *received_event = data;
@@ -87,6 +105,20 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
                received_event->cpu_index, received_event->thread_identifier,
                received_event->scheduler_waking.woken_thread_identifier,
                received_event->scheduler_waking.woken_process_identifier);
+        break;
+    case EVENT_TYPE_FUTEX_ENTER:
+        printf("%llu cpu=%u futex_enter thread=%u address=0x%llx operation=%s\n",
+               (unsigned long long)received_event->timestamp_nanoseconds,
+               received_event->cpu_index, received_event->thread_identifier,
+               (unsigned long long)received_event->futex_enter.futex_address,
+               futex_operation_name(received_event->futex_enter.futex_operation, buf,
+                                    sizeof(buf)));
+        break;
+    case EVENT_TYPE_FUTEX_EXIT:
+        printf("%llu cpu=%u futex_exit thread=%u return_value=%lld\n",
+               (unsigned long long)received_event->timestamp_nanoseconds,
+               received_event->cpu_index, received_event->thread_identifier,
+               (long long)received_event->futex_exit.return_value);
         break;
     }
     return 0;
