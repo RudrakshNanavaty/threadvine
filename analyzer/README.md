@@ -69,6 +69,16 @@ uv run analyzer compare manifest.csv --dot-directory figures/
 Confident edges are green when true and red when false; true edges the graph missed are
 drawn dashed grey. Colours come from the same `score_graph` result as the tables.
 
+## Placement plan
+
+```bash
+uv run analyzer plan wakeup.json --cpus 4
+```
+
+Uses confident wakeup edges only. Each connected group gets a disjoint CPU block
+proportional to its thread count. Output:
+`{"cpu_count", "assignments": {"<thread_id>": [cpus]}, "unpinned": [thread_ids]}`.
+
 ## Methods
 
 | Method | Evidence | Notes |

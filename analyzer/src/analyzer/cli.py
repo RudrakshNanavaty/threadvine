@@ -1,4 +1,4 @@
-"""Command-line interface: ``infer``, ``score`` and ``compare`` subcommands.
+"""Command-line interface: ``infer``, ``score``, ``compare`` and ``plan`` subcommands.
 
 ``infer`` never opens ground-truth files. ``score`` never opens a raw trace.
 That split is intentional: relationship discovery must not peek at the answer
@@ -7,6 +7,7 @@ key (see ``docs/ground-truth-format.md``).
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Annotated, Literal
@@ -29,6 +30,7 @@ from analyzer.graph import (
     write_graph_dot,
     write_graph_json,
 )
+from analyzer.plan import build_plan
 from analyzer.scoring import format_score_report, score_graph, write_scored_graph_dot
 from analyzer.trace import prepare_trace
 
@@ -206,6 +208,23 @@ def compare(
             dot_path = dot_directory / f"{result.workload}__{trace_stem}__{result.method_label}.dot"
             write_scored_graph_dot(result.graph, result.report, str(dot_path))
         print(f"wrote DOT files to {dot_directory}", file=sys.stderr)
+    return 0
+
+
+@app.command()
+def plan(
+    graph: Annotated[
+        Path,
+        typer.Argument(help="Wakeup graph.json produced by infer"),
+    ],
+    cpus: Annotated[
+        int,
+        typer.Option(help="Number of CPUs available for placement"),
+    ],
+) -> int:
+    """Print a JSON thread-to-CPU plan: one disjoint CPU block per confident group."""
+    placement_plan = build_plan(load_graph_json(str(graph)), cpus)
+    print(json.dumps(placement_plan, indent=2))
     return 0
 
 
