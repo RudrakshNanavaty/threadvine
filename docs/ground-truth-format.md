@@ -58,8 +58,9 @@ Written next to where you run `./pipeline` (prefix set with `-o`, default
 | `stage` | `producer_to_worker` or `worker_to_sink` |
 | `put_ns` | When the sender put it in the queue |
 | `get_ns` | When the receiver took it out |
+| `phase` | `timed` for the measured run, `profile` for the profile phase (`-W`). Always `timed` without `-W`. |
 
-Each item produces exactly two rows: one per stage.
+Each item produces exactly two rows: one per stage. Item numbers start at 0 again in each phase, so an item is identified by `group`, `phase` and `item_id`.
 
 ## Clock
 
@@ -87,11 +88,29 @@ directly. Do not use wall-clock time.
 | `-m MODE` | `sleep` (uses no CPU) or `spin` (burns CPU time) | sleep |
 | `-q N` | queue capacity | 8 |
 | `-d S` | seconds to wait before starting | 0 |
+| `-W S` | profile phase of S seconds, then wait for SIGUSR1 and start a fresh timed interval (see below) | 0 (off) |
 | `-o PREFIX` | ground-truth file prefix | groundtruth |
 
 `spin` mode counts the thread's own CPU time, so the amount of work stays fixed
 even if the thread is preempted. Use it for the CPU-contention experiments;
 `sleep` mode uses almost no CPU.
+
+## Profile phase (`-W S`)
+
+Used when something has to happen to the running threads between tracing them and
+measuring them, for example pinning them to CPUs from a plan built on the trace.
+
+1. The threads run the normal workload for `S` seconds (the profile phase). Attach the
+   collector before this starts (`-d`), and build the thread graph from its trace.
+2. The benchmark drains the profile items and prints `waiting for SIGUSR1 (kill -USR1 <pid>)`.
+   The threads are idle now. Apply the CPU pinning here. The thread ids stay the same.
+3. Send `kill -USR1 <pid>`. A signal sent earlier is not lost: it is used as soon as the
+   profile phase has drained.
+4. A fresh timed interval of `-n` items per group runs on the same process. Only this
+   interval counts for throughput and latency. The summary line describes it alone.
+5. The answer key holds both phases (column `phase`). Profile-phase items are in the key
+   so the graph built from the profile can be scored. `check_groundtruth.py --items N`
+   checks the timed items against `N`; the profile items are checked only for gaps.
 
 ## Summary line
 

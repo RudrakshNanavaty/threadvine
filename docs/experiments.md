@@ -73,3 +73,14 @@ Strategies: `default` changes nothing; `round-robin` gives the sorted thread ids
 Plan file format: `{"cpu_count": 4, "assignments": {"<tid>": [0, 1]}, "unpinned": [<tid>]}`. Threads in `unpinned` (in practice the main thread) are left alone. The script warns about threads in the process that are not in the plan, and about plan threads that are not in the process. It exits 0 if every pin worked, 1 if any failed, and 2 for bad input such as a missing process or a CPU the machine does not have.
 
 Check the result with `taskset -cp <tid>`.
+
+## Profile phase, then pin, then measure (`-W`)
+
+`./build/pipeline -W S ...` runs the workload for `S` seconds as a profile phase, waits for `SIGUSR1`, then starts a fresh timed interval on the same process. Only that interval counts for throughput and p95 latency. Use it to compare placements on one process, because a plan is keyed on thread ids that only exist for the process that was traced.
+
+    ./build/pipeline -d 5 -W 10 -g 2 -w 2 -m spin -p 0 -o /tmp/run &    # prints its pid
+    # attach the collector during the -d delay, build the graph and plan from the trace
+    python3 experiments/apply_plan.py <pid> --strategy plan --plan plan.json
+    kill -USR1 <pid>                                                  # starts the timed interval
+
+The profile items are in the answer key (column `phase`), so the graph built from the profile can still be scored. Details: `docs/ground-truth-format.md`.
