@@ -5,7 +5,7 @@
     "minimum_fraction": 0.05,
     "timing_window_us": null,
     "trace_path": "/tmp/traced_run.events.bin",
-    "target_process_identifier": 233740,
+    "target_pid": 233740,
     "recorded_event_count": 992,
     "dropped_event_count": 0,
     "has_end_of_trace": true,
@@ -13,7 +13,7 @@
   },
   "threads": {
     "233740": {
-      "thread_identifier": 233740,
+      "thread_id": 233740,
       "incoming_evidence_count": 3,
       "outgoing_evidence_count": 1,
       "delay": {
@@ -24,7 +24,7 @@
       }
     },
     "233853": {
-      "thread_identifier": 233853,
+      "thread_id": 233853,
       "incoming_evidence_count": 0,
       "outgoing_evidence_count": 41,
       "delay": {
@@ -35,7 +35,7 @@
       }
     },
     "233854": {
-      "thread_identifier": 233854,
+      "thread_id": 233854,
       "incoming_evidence_count": 20,
       "outgoing_evidence_count": 23,
       "delay": {
@@ -46,7 +46,7 @@
       }
     },
     "233855": {
-      "thread_identifier": 233855,
+      "thread_id": 233855,
       "incoming_evidence_count": 20,
       "outgoing_evidence_count": 19,
       "delay": {
@@ -57,7 +57,7 @@
       }
     },
     "233856": {
-      "thread_identifier": 233856,
+      "thread_id": 233856,
       "incoming_evidence_count": 41,
       "outgoing_evidence_count": 0,
       "delay": {
@@ -68,7 +68,7 @@
       }
     },
     "233857": {
-      "thread_identifier": 233857,
+      "thread_id": 233857,
       "incoming_evidence_count": 0,
       "outgoing_evidence_count": 40,
       "delay": {
@@ -79,7 +79,7 @@
       }
     },
     "233858": {
-      "thread_identifier": 233858,
+      "thread_id": 233858,
       "incoming_evidence_count": 20,
       "outgoing_evidence_count": 20,
       "delay": {
@@ -90,7 +90,7 @@
       }
     },
     "233859": {
-      "thread_identifier": 233859,
+      "thread_id": 233859,
       "incoming_evidence_count": 20,
       "outgoing_evidence_count": 21,
       "delay": {
@@ -101,7 +101,7 @@
       }
     },
     "233860": {
-      "thread_identifier": 233860,
+      "thread_id": 233860,
       "incoming_evidence_count": 41,
       "outgoing_evidence_count": 0,
       "delay": {
@@ -114,8 +114,8 @@
   },
   "edges": [
     {
-      "source_thread_identifier": 233740,
-      "destination_thread_identifier": 233860,
+      "source_thread_id": 233740,
+      "destination_thread_id": 233860,
       "confidence": "ambiguous",
       "wakeup_count": 1,
       "reverse_wakeup_count": 0,
@@ -128,8 +128,8 @@
       }
     },
     {
-      "source_thread_identifier": 233853,
-      "destination_thread_identifier": 233740,
+      "source_thread_id": 233853,
+      "destination_thread_id": 233740,
       "confidence": "ambiguous",
       "wakeup_count": 1,
       "reverse_wakeup_count": 0,
@@ -142,8 +142,8 @@
       }
     },
     {
-      "source_thread_identifier": 233853,
-      "destination_thread_identifier": 233854,
+      "source_thread_id": 233853,
+      "destination_thread_id": 233854,
       "confidence": "confident",
       "wakeup_count": 20,
       "reverse_wakeup_count": 0,
@@ -156,8 +156,8 @@
       }
     },
     {
-      "source_thread_identifier": 233853,
-      "destination_thread_identifier": 233855,
+      "source_thread_id": 233853,
+      "destination_thread_id": 233855,
       "confidence": "confident",
       "wakeup_count": 20,
       "reverse_wakeup_count": 0,
@@ -170,8 +170,8 @@
       }
     },
     {
-      "source_thread_identifier": 233854,
-      "destination_thread_identifier": 233740,
+      "source_thread_id": 233854,
+      "destination_thread_id": 233740,
       "confidence": "ambiguous",
       "wakeup_count": 1,
       "reverse_wakeup_count": 0,
@@ -184,8 +184,8 @@
       }
     },
     {
-      "source_thread_identifier": 233854,
-      "destination_thread_identifier": 233856,
+      "source_thread_id": 233854,
+      "destination_thread_id": 233856,
       "confidence": "confident",
       "wakeup_count": 22,
       "reverse_wakeup_count": 0,
@@ -198,8 +198,8 @@
       }
     },
     {
-      "source_thread_identifier": 233855,
-      "destination_thread_identifier": 233856,
+      "source_thread_id": 233855,
+      "destination_thread_id": 233856,
       "confidence": "confident",
       "wakeup_count": 19,
       "reverse_wakeup_count": 0,
@@ -212,8 +212,8 @@
       }
     },
     {
-      "source_thread_identifier": 233857,
-      "destination_thread_identifier": 233858,
+      "source_thread_id": 233857,
+      "destination_thread_id": 233858,
       "confidence": "confident",
       "wakeup_count": 20,
       "reverse_wakeup_count": 0,
@@ -226,8 +226,8 @@
       }
     },
     {
-      "source_thread_identifier": 233857,
-      "destination_thread_identifier": 233859,
+      "source_thread_id": 233857,
+      "destination_thread_id": 233859,
       "confidence": "confident",
       "wakeup_count": 20,
       "reverse_wakeup_count": 0,
@@ -240,8 +240,8 @@
       }
     },
     {
-      "source_thread_identifier": 233858,
-      "destination_thread_identifier": 233860,
+      "source_thread_id": 233858,
+      "destination_thread_id": 233860,
       "confidence": "confident",
       "wakeup_count": 20,
       "reverse_wakeup_count": 0,
@@ -254,8 +254,8 @@
       }
     },
     {
-      "source_thread_identifier": 233859,
-      "destination_thread_identifier": 233740,
+      "source_thread_id": 233859,
+      "destination_thread_id": 233740,
       "confidence": "ambiguous",
       "wakeup_count": 1,
       "reverse_wakeup_count": 0,
@@ -268,8 +268,8 @@
       }
     },
     {
-      "source_thread_identifier": 233859,
-      "destination_thread_identifier": 233860,
+      "source_thread_id": 233859,
+      "destination_thread_id": 233860,
       "confidence": "confident",
       "wakeup_count": 20,
       "reverse_wakeup_count": 0,

@@ -15,7 +15,7 @@ This method:
 4. Applies confidence thresholds via ``Graph.apply_thresholds``.
 
 Outside wakers (idle, softirq) never form edges: they are not in
-``trace.target_thread_identifiers``.
+``trace.target_thread_ids``.
 """
 
 from __future__ import annotations
@@ -42,13 +42,13 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
     delays_by_thread: dict[int, list[int]] = defaultdict(list)
 
     # Precompute switch-in times per thread so each waking can find the next one.
-    # next_thread_identifier is who is about to run on that CPU.
+    # next_thread_id is who is about to run on that CPU.
     switch_in_times: dict[int, list[int]] = defaultdict(list)
     for event in trace.events:
         if event["event_type"] != "EVENT_TYPE_SCHEDULER_SWITCH":
             continue
-        next_thread = event["scheduler_switch"]["next_thread_identifier"]
-        if next_thread in trace.target_thread_identifiers:
+        next_thread = event["scheduler_switch"]["next_thread_id"]
+        if next_thread in trace.target_thread_ids:
             switch_in_times[next_thread].append(event["timestamp_nanoseconds"])
 
     # Monotone cursors: events are time-sorted, so we never scan backward.
@@ -57,14 +57,14 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
     for event in trace.events:
         if event["event_type"] != "EVENT_TYPE_SCHEDULER_WAKING":
             continue
-        waker = event["thread_identifier"]
-        woken = event["scheduler_waking"]["woken_thread_identifier"]
+        waker = event["thread_id"]
+        woken = event["scheduler_waking"]["woken_thread_id"]
         if waker == woken:
             continue
         # Edges require both endpoints inside the traced application.
-        if waker not in trace.target_thread_identifiers:
+        if waker not in trace.target_thread_ids:
             continue
-        if woken not in trace.target_thread_identifiers:
+        if woken not in trace.target_thread_ids:
             continue
         wakeup_counts[(waker, woken)] += 1
 
@@ -100,8 +100,8 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
             delay_samples = delays_by_pair.get((woken, waker), [])
         edges.append(
             Edge(
-                source_thread_identifier=source,
-                destination_thread_identifier=destination,
+                source_thread_id=source,
+                destination_thread_id=destination,
                 wakeup_count=primary,
                 reverse_wakeup_count=reverse,
                 delay=summarize_delays_nanoseconds(delay_samples),
@@ -109,11 +109,11 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
         )
 
     threads: dict[int, ThreadSummary] = {}
-    for thread_identifier in trace.target_thread_identifiers:
-        threads[thread_identifier] = ThreadSummary(
-            thread_identifier=thread_identifier,
+    for thread_id in trace.target_thread_ids:
+        threads[thread_id] = ThreadSummary(
+            thread_id=thread_id,
             delay=summarize_delays_nanoseconds(
-                delays_by_thread.get(thread_identifier, [])
+                delays_by_thread.get(thread_id, [])
             ),
         )
 
@@ -123,8 +123,8 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
             minimum_count=settings.minimum_count,
             minimum_fraction=settings.minimum_fraction,
             timing_window_us=None,
-            trace_path=trace.path,
-            target_process_identifier=trace.target_process_identifier,
+            trace_path=trace.file_path,
+            target_pid=trace.target_pid,
             recorded_event_count=trace.recorded_event_count,
             dropped_event_count=trace.dropped_event_count,
             has_end_of_trace=trace.has_end_of_trace,

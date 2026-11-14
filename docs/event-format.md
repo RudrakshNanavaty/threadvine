@@ -141,7 +141,7 @@ Example run against the benchmark:
 ./build/pipeline -d 5 ... -o traced_run & make -s run ARGS="--output traced_run.events.bin $!"
 ```
 
-The decoder lives in `analyzer/src/analyzer/trace_reader.py`.
+The decoder lives in `analyzer/src/analyzer/event_decoder.py`.
 `bpf/tools/read_events.py` is a thin shim around it: `read_events(path)` yields
 each event as a dictionary with the field names above (payload under the union
 member's name, reserved fields omitted). It also accepts a `.jsonl` file of the
