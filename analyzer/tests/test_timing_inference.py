@@ -5,7 +5,7 @@ from pathlib import Path
 
 from analyzer.graph import InferenceSettings
 from analyzer.timing_inference import infer
-from analyzer.trace import load_trace
+from analyzer.trace import prepare_trace
 
 from conftest import end_of_trace, switch, waking, write_jsonl
 
@@ -37,7 +37,7 @@ def test_block_then_start_within_window(tmp_path: Path) -> None:
     # Thread 9 must be in-process so switch events are kept.
     for event in events:
         if event['event_type'] == 'EVENT_TYPE_SCHEDULER_SWITCH':
-            event['process_identifier'] = 100
+            event['process_id'] = 100
     path = tmp_path / 'timing.jsonl'
     write_jsonl(path, events)
 
@@ -47,9 +47,9 @@ def test_block_then_start_within_window(tmp_path: Path) -> None:
         minimum_fraction=0.05,
         timing_window_us=100,
     )
-    graph = infer(load_trace(str(path)), settings)
+    graph = infer(prepare_trace(str(path)), settings)
     by_pair = {
-        (edge.source_thread_identifier, edge.destination_thread_identifier): edge
+        (edge.source_thread_id, edge.destination_thread_id): edge
         for edge in graph.edges
     }
     assert (1, 2) in by_pair

@@ -37,12 +37,12 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
     timing_counts: dict[tuple[int, int], int] = defaultdict(int)
 
     # All target-thread switch-ins in time order (trace.events is already sorted).
-    switch_ins: list[tuple[int, int]] = []  # (timestamp_nanoseconds, thread_identifier)
+    switch_ins: list[tuple[int, int]] = []  # (timestamp_nanoseconds, thread_id)
     for event in trace.events:
         if event["event_type"] != "EVENT_TYPE_SCHEDULER_SWITCH":
             continue
-        next_thread = event["scheduler_switch"]["next_thread_identifier"]
-        if next_thread in trace.target_thread_identifiers:
+        next_thread = event["scheduler_switch"]["next_thread_id"]
+        if next_thread in trace.target_thread_ids:
             switch_ins.append((event["timestamp_nanoseconds"], next_thread))
 
     # Sliding cursor: only switch-ins at or after the current block time matter.
@@ -51,9 +51,9 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
         if event["event_type"] != "EVENT_TYPE_SCHEDULER_SWITCH":
             continue
         switch = event["scheduler_switch"]
-        previous_thread = switch["previous_thread_identifier"]
+        previous_thread = switch["previous_thread_id"]
         previous_state = switch["previous_thread_state"]
-        if previous_thread not in trace.target_thread_identifiers:
+        if previous_thread not in trace.target_thread_ids:
             continue
         if previous_state == 0:
             # Runnable / preempted: A did not block waiting for someone else.
@@ -87,23 +87,23 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
         ):
             edges.append(
                 Edge(
-                    source_thread_identifier=source,
-                    destination_thread_identifier=destination,
+                    source_thread_id=source,
+                    destination_thread_id=destination,
                     timing_count=forward_count,
                 )
             )
         else:
             edges.append(
                 Edge(
-                    source_thread_identifier=destination,
-                    destination_thread_identifier=source,
+                    source_thread_id=destination,
+                    destination_thread_id=source,
                     timing_count=reverse_count,
                 )
             )
 
     threads = {
-        thread_identifier: ThreadSummary(thread_identifier=thread_identifier)
-        for thread_identifier in trace.target_thread_identifiers
+        thread_id: ThreadSummary(thread_id=thread_id)
+        for thread_id in trace.target_thread_ids
     }
     graph = Graph(
         metadata=GraphMetadata(
@@ -111,8 +111,8 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
             minimum_count=settings.minimum_count,
             minimum_fraction=settings.minimum_fraction,
             timing_window_us=settings.timing_window_us,
-            trace_path=trace.path,
-            target_process_identifier=trace.target_process_identifier,
+            trace_path=trace.file_path,
+            target_pid=trace.target_pid,
             recorded_event_count=trace.recorded_event_count,
             dropped_event_count=trace.dropped_event_count,
             has_end_of_trace=trace.has_end_of_trace,

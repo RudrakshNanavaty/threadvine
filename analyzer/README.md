@@ -93,8 +93,8 @@ lives in `tests/fixtures/real_run/`.
 
 | Module | Role |
 | --- | --- |
-| `trace_reader.py` | Binary / `.jsonl` decoder (also used by `bpf/tools/read_events.py`) |
-| `trace.py` | Sort, pick target process, keep events that involve it |
+| `event_decoder.py` | Binary / `.jsonl` decoder (also used by `bpf/tools/read_events.py`) |
+| `trace.py` | `prepare_trace`: sort, pick target process, keep events that involve it |
 | `wakeup_inference.py` / `timing_inference.py` | `infer(trace, settings) -> Graph` |
 | `graph.py` | Edge labels, JSON and DOT output |
 | `scoring.py` | Ground-truth comparison |

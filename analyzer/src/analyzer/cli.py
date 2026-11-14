@@ -23,7 +23,7 @@ from analyzer.graph import (
     write_graph_json,
 )
 from analyzer.scoring import format_score_report, score_graph
-from analyzer.trace import load_trace
+from analyzer.trace import prepare_trace
 
 app = typer.Typer(
     help="Infer and score thread relationship graphs from collector traces.",
@@ -49,8 +49,7 @@ def infer(
         Path | None,
         typer.Option(
             help=(
-                "Graphviz DOT output path "
-                "(default: same stem as --output with .dot)"
+                "Graphviz DOT output path (default: same stem as --output with .dot)"
             ),
         ),
     ] = None,
@@ -88,18 +87,18 @@ def infer(
         minimum_fraction=minimum_fraction,
         timing_window_us=timing_window_us,
     )
-    loaded_trace = load_trace(str(trace))
+    prepared_trace = prepare_trace(str(trace))
     if method == "wakeup":
-        graph = wakeup_inference.infer(loaded_trace, settings)
+        graph = wakeup_inference.infer(prepared_trace, settings)
     else:
-        graph = timing_inference.infer(loaded_trace, settings)
+        graph = timing_inference.infer(prepared_trace, settings)
 
     # Lossy traces still produce a graph; warnings travel into score via metadata.
     for warning in graph.loss_warnings():
         print(f"WARNING: {warning}", file=sys.stderr)
-    if loaded_trace.outside_process_event_count:
+    if prepared_trace.outside_process_event_count:
         print(
-            f"note: dropped {loaded_trace.outside_process_event_count} events involving "
+            f"note: dropped {prepared_trace.outside_process_event_count} events involving "
             "threads outside the target process",
             file=sys.stderr,
         )

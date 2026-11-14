@@ -3,12 +3,13 @@
 This module is the single owner of the on-disk format. ``bpf/tools/read_events.py``
 is a thin shim that imports from here so collector-side summaries stay working.
 
-``read_events(path)`` yields one dictionary per event, with the field names from
-``docs/event-format.md``, for example::
+``read_events(path)`` yields one dictionary per event. Binary layout matches
+``bpf/event.h`` / ``docs/event-format.md``; Python keys use the shorter ``_id``
+forms (``thread_id``, not ``thread_identifier``), for example::
 
     {"timestamp_nanoseconds": ..., "event_type": "EVENT_TYPE_SCHEDULER_WAKING",
-     "cpu_index": ..., "thread_identifier": ..., "process_identifier": ...,
-     "scheduler_waking": {"woken_thread_identifier": ..., "woken_process_identifier": ...}}
+     "cpu_index": ..., "thread_id": ..., "process_id": ...,
+     "scheduler_waking": {"woken_thread_id": ..., "woken_process_id": ...}}
 
 Reserved / unused payload bytes are omitted. Two inputs are accepted:
 
@@ -29,11 +30,11 @@ import sys
 # "TRPF" = TRace PFofile; matches bpf/event.h FILE_MAGIC.
 FILE_MAGIC = b"TRPF"
 # Layout must stay in lockstep with struct event_file_header in bpf/event.h.
-# magic, format_version, record_size_bytes, clock_identifier, target_process_identifier,
+# magic, format_version, record_size_bytes, clock_id, target_pid,
 # reserved, start_timestamp_nanoseconds
 FILE_HEADER = struct.Struct("<4sIIIIIQ")
 # Layout must stay in lockstep with the header of struct event in bpf/event.h.
-# timestamp_nanoseconds, event_type, cpu_index, thread_identifier, process_identifier
+# timestamp_nanoseconds, event_type, cpu_index, thread_id, process_id
 EVENT_HEADER = struct.Struct("<QIIII")
 
 PIPE_OR_SOCKET_FIELDS = (
@@ -49,8 +50,8 @@ EVENT_TYPES = {
         "scheduler_switch",
         "<IIQ",
         (
-            "previous_thread_identifier",
-            "next_thread_identifier",
+            "previous_thread_id",
+            "next_thread_id",
             "previous_thread_state",
         ),
     ),
@@ -58,7 +59,7 @@ EVENT_TYPES = {
         "EVENT_TYPE_SCHEDULER_WAKING",
         "scheduler_waking",
         "<II",
-        ("woken_thread_identifier", "woken_process_identifier"),
+        ("woken_thread_id", "woken_process_id"),
     ),
     3: (
         "EVENT_TYPE_FUTEX_ENTER",
@@ -102,22 +103,25 @@ def read_file_header(path):
     """
     with open(path, "rb") as trace_file:
         raw_header = trace_file.read(FILE_HEADER.size)
+
     if len(raw_header) < FILE_HEADER.size or raw_header[:4] != FILE_MAGIC:
         raise ValueError(f"{path}: not a collector trace file")
+
     (
         _,
         format_version,
         record_size_bytes,
-        clock_identifier,
-        target_process_identifier,
+        clock_id,
+        target_pid,
         _,
         start_timestamp_nanoseconds,
     ) = FILE_HEADER.unpack(raw_header)
+
     return {
         "format_version": format_version,
         "record_size_bytes": record_size_bytes,
-        "clock_identifier": clock_identifier,
-        "target_process_identifier": target_process_identifier,
+        "clock_id": clock_id,
+        "target_pid": target_pid,
         "start_timestamp_nanoseconds": start_timestamp_nanoseconds,
     }
 
@@ -128,31 +132,37 @@ def _decode_record(record):
         timestamp_nanoseconds,
         event_type,
         cpu_index,
-        thread_identifier,
-        process_identifier,
+        thread_id,
+        process_id,
     ) = EVENT_HEADER.unpack_from(record)
     event = {
         "timestamp_nanoseconds": timestamp_nanoseconds,
         "event_type": event_type,
         "cpu_index": cpu_index,
-        "thread_identifier": thread_identifier,
-        "process_identifier": process_identifier,
+        "thread_id": thread_id,
+        "process_id": process_id,
     }
+
     known_type = EVENT_TYPES.get(event_type)
+
     if known_type is None:
         # Forward-compatible: keep the numeric type, leave payload undecoded.
         return event
+
     name, payload_member, payload_format, field_names = known_type
     payload = record[EVENT_HEADER.size :]
     event["event_type"] = name
+
     if payload_format is None:
         # thread_name: kernel stores at most 15 chars + NUL in a char[16].
         thread_name = payload[:16].split(b"\0", 1)[0].decode(errors="replace")
         event[payload_member] = {"thread_name": thread_name}
+
     else:
         event[payload_member] = dict(
             zip(field_names, struct.unpack_from(payload_format, payload))
         )
+
     return event
 
 
@@ -170,11 +180,14 @@ def read_events(path):
         return
 
     record_size_bytes = read_file_header(path)["record_size_bytes"]
+
     with open(path, "rb") as trace_file:
         trace_file.seek(FILE_HEADER.size)
+
         while record := trace_file.read(record_size_bytes):
             if len(record) < record_size_bytes:
                 raise ValueError(f"{path}: truncated record at end of file")
+
             yield _decode_record(record)
 
 
@@ -182,28 +195,37 @@ def main():
     """Print a short summary of a trace file (event counts and top wakeup pairs)."""
     if len(sys.argv) != 2:
         sys.exit(f"usage: {sys.argv[0]} TRACE_FILE")
+
     path = sys.argv[1]
+    # Counters for each event type and each (waker, woken) wakeup pair.
     event_type_counts = collections.Counter()
     wakeup_pair_counts = collections.Counter()
     end_of_trace = None
+
     for event in read_events(path):
         event_type_counts[event["event_type"]] += 1
         if event["event_type"] == "EVENT_TYPE_SCHEDULER_WAKING":
-            woken = event["scheduler_waking"]["woken_thread_identifier"]
-            wakeup_pair_counts[(event["thread_identifier"], woken)] += 1
+            woken = event["scheduler_waking"]["woken_thread_id"]
+            wakeup_pair_counts[(event["thread_id"], woken)] += 1
+
         elif event["event_type"] == "EVENT_TYPE_END_OF_TRACE":
             end_of_trace = event["end_of_trace"]
 
     if is_binary_trace(path):
         print(read_file_header(path))
+
+    # Print all event types by count.
     for name, count in event_type_counts.most_common():
         print(f"{count:>10}  {name}")
+
     print(
         end_of_trace
         if end_of_trace
         else "WARNING: no END_OF_TRACE record, trace was cut short"
     )
+
     print("top wakeups (waker -> woken):")
+
     for (waker, woken), count in wakeup_pair_counts.most_common(5):
         print(f"{count:>10}  {waker} -> {woken}")
 

@@ -56,8 +56,8 @@ class DelaySummary:
 class Edge:
     """One directed relationship between two threads."""
 
-    source_thread_identifier: int
-    destination_thread_identifier: int
+    source_thread_id: int
+    destination_thread_id: int
     confidence: str = "ambiguous"  # 'confident' or 'ambiguous'
     # Wakeups in the edge direction after dominant-direction collapse.
     wakeup_count: int = 0
@@ -80,7 +80,7 @@ class Edge:
 class ThreadSummary:
     """Per-thread evidence totals and (for wakeup) delay summary."""
 
-    thread_identifier: int
+    thread_id: int
     incoming_evidence_count: int = 0
     outgoing_evidence_count: int = 0
     delay: DelaySummary = field(default_factory=DelaySummary)
@@ -95,7 +95,7 @@ class GraphMetadata:
     minimum_fraction: float
     timing_window_us: int | None
     trace_path: str
-    target_process_identifier: int
+    target_pid: int
     recorded_event_count: int | None
     dropped_event_count: int
     has_end_of_trace: bool
@@ -116,21 +116,21 @@ class Graph:
         incoming: dict[int, int] = {}
         for edge in self.edges:
             count = edge.primary_count(settings.method)
-            incoming[edge.destination_thread_identifier] = (
-                incoming.get(edge.destination_thread_identifier, 0) + count
+            incoming[edge.destination_thread_id] = (
+                incoming.get(edge.destination_thread_id, 0) + count
             )
-            if edge.source_thread_identifier not in self.threads:
-                self.threads[edge.source_thread_identifier] = ThreadSummary(
-                    edge.source_thread_identifier
+            if edge.source_thread_id not in self.threads:
+                self.threads[edge.source_thread_id] = ThreadSummary(
+                    edge.source_thread_id
                 )
-            if edge.destination_thread_identifier not in self.threads:
-                self.threads[edge.destination_thread_identifier] = ThreadSummary(
-                    edge.destination_thread_identifier
+            if edge.destination_thread_id not in self.threads:
+                self.threads[edge.destination_thread_id] = ThreadSummary(
+                    edge.destination_thread_id
                 )
 
         for edge in self.edges:
             count = edge.primary_count(settings.method)
-            destination_total = incoming.get(edge.destination_thread_identifier, 0)
+            destination_total = incoming.get(edge.destination_thread_id, 0)
             fraction = (count / destination_total) if destination_total else 0.0
             if (
                 count >= settings.minimum_count
@@ -145,9 +145,9 @@ class Graph:
             thread_summary.outgoing_evidence_count = 0
         for edge in self.edges:
             count = edge.primary_count(settings.method)
-            self.threads[edge.source_thread_identifier].outgoing_evidence_count += count
+            self.threads[edge.source_thread_id].outgoing_evidence_count += count
             self.threads[
-                edge.destination_thread_identifier
+                edge.destination_thread_id
             ].incoming_evidence_count += count
 
     def loss_warnings(self) -> list[str]:
@@ -199,18 +199,18 @@ def graph_to_dict(graph: Graph) -> dict[str, Any]:
     return {
         "metadata": metadata,
         "threads": {
-            str(thread_identifier): {
-                "thread_identifier": summary.thread_identifier,
+            str(thread_id): {
+                "thread_id": summary.thread_id,
                 "incoming_evidence_count": summary.incoming_evidence_count,
                 "outgoing_evidence_count": summary.outgoing_evidence_count,
                 "delay": _delay_to_dict(summary.delay),
             }
-            for thread_identifier, summary in sorted(graph.threads.items())
+            for thread_id, summary in sorted(graph.threads.items())
         },
         "edges": [
             {
-                "source_thread_identifier": edge.source_thread_identifier,
-                "destination_thread_identifier": edge.destination_thread_identifier,
+                "source_thread_id": edge.source_thread_id,
+                "destination_thread_id": edge.destination_thread_id,
                 "confidence": edge.confidence,
                 "wakeup_count": edge.wakeup_count,
                 "reverse_wakeup_count": edge.reverse_wakeup_count,
@@ -220,8 +220,8 @@ def graph_to_dict(graph: Graph) -> dict[str, Any]:
             for edge in sorted(
                 graph.edges,
                 key=lambda edge: (
-                    edge.source_thread_identifier,
-                    edge.destination_thread_identifier,
+                    edge.source_thread_id,
+                    edge.destination_thread_id,
                 ),
             )
         ],
@@ -244,7 +244,7 @@ def load_graph_json(path: str) -> Graph:
     for thread_key, summary in data.get("threads", {}).items():
         delay = DelaySummary(**summary.get("delay", {}))
         threads[int(thread_key)] = ThreadSummary(
-            thread_identifier=summary["thread_identifier"],
+            thread_id=summary["thread_id"],
             incoming_evidence_count=summary.get("incoming_evidence_count", 0),
             outgoing_evidence_count=summary.get("outgoing_evidence_count", 0),
             delay=delay,
@@ -254,9 +254,9 @@ def load_graph_json(path: str) -> Graph:
         delay = DelaySummary(**edge_data.get("delay", {}))
         edges.append(
             Edge(
-                source_thread_identifier=edge_data["source_thread_identifier"],
-                destination_thread_identifier=edge_data[
-                    "destination_thread_identifier"
+                source_thread_id=edge_data["source_thread_id"],
+                destination_thread_id=edge_data[
+                    "destination_thread_id"
                 ],
                 confidence=edge_data.get("confidence", "ambiguous"),
                 wakeup_count=edge_data.get("wakeup_count", 0),
@@ -274,13 +274,13 @@ def write_graph_dot(graph: Graph, path: str) -> None:
     Render with e.g. ``dot -Tpng graph.dot -o graph.png``.
     """
     lines = ["digraph thread_relationships {", "  rankdir=LR;"]
-    for thread_identifier in sorted(graph.threads):
-        lines.append(f'  t{thread_identifier} [label="{thread_identifier}"];')
+    for thread_id in sorted(graph.threads):
+        lines.append(f'  t{thread_id} [label="{thread_id}"];')
     for edge in sorted(
         graph.edges,
         key=lambda edge: (
-            edge.source_thread_identifier,
-            edge.destination_thread_identifier,
+            edge.source_thread_id,
+            edge.destination_thread_id,
         ),
     ):
         style = "solid" if edge.confidence == "confident" else "dashed"
@@ -289,7 +289,7 @@ def write_graph_dot(graph: Graph, path: str) -> None:
         else:
             label_count = edge.wakeup_count
         lines.append(
-            f"  t{edge.source_thread_identifier} -> t{edge.destination_thread_identifier} "
+            f"  t{edge.source_thread_id} -> t{edge.destination_thread_id} "
             f'[style={style}, label="{label_count}"];'
         )
     lines.append("}")

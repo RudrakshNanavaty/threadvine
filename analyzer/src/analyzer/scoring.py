@@ -27,7 +27,7 @@ from analyzer.graph import Graph
 class ThreadInfo:
     """One row from ``PREFIX.threads.csv`` (benchmark role metadata)."""
 
-    thread_identifier: int
+    thread_id: int
     role: str
     group: int
     index: int
@@ -72,9 +72,9 @@ def load_ground_truth(
     with open(f"{prefix}.threads.csv", newline="") as threads_file:
         for row in csv.DictReader(threads_file):
             # Column name "tid" is the benchmark's spelling of thread id (gettid()).
-            thread_identifier = int(row["tid"])
-            threads[thread_identifier] = ThreadInfo(
-                thread_identifier=thread_identifier,
+            thread_id = int(row["tid"])
+            threads[thread_id] = ThreadInfo(
+                thread_id=thread_id,
                 role=row["role"],
                 group=int(row["group"]),
                 index=int(row["index"]),
@@ -97,7 +97,7 @@ def score_graph(graph: Graph, ground_truth_prefix: str) -> ScoreReport:
     """Compare confident edges in the graph to the true edge set."""
     threads, true_edges = load_ground_truth(ground_truth_prefix)
     confident = {
-        (edge.source_thread_identifier, edge.destination_thread_identifier)
+        (edge.source_thread_id, edge.destination_thread_id)
         for edge in graph.edges
         if edge.confidence == "confident"
     }
@@ -152,12 +152,12 @@ def score_graph(graph: Graph, ground_truth_prefix: str) -> ScoreReport:
     )
 
 
-def format_thread(thread_identifier: int, threads: dict[int, ThreadInfo]) -> str:
+def format_thread(thread_id: int, threads: dict[int, ThreadInfo]) -> str:
     """Pretty-print a tid using benchmark role metadata when available."""
-    info = threads.get(thread_identifier)
+    info = threads.get(thread_id)
     if info is None:
-        return f"unknown({thread_identifier})"
-    return f"{info.role}[g{info.group}.{info.index}]({thread_identifier})"
+        return f"unknown({thread_id})"
+    return f"{info.role}[g{info.group}.{info.index}]({thread_id})"
 
 
 def format_score_report(report: ScoreReport) -> str:
