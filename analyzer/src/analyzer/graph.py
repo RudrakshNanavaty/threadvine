@@ -39,6 +39,10 @@ class InferenceSettings:
     # Opt-in noise filter: an edge must also carry at least this share of its
     # source thread's outgoing evidence. 0.0 (the default) disables it.
     minimum_source_fraction: float = 0.0
+    # Wakeup method: how to pick an edge's arrow. "volume" (default) uses the busier
+    # direction; "first-wakeup" uses the direction that wakes first, among directions
+    # with at least ``minimum_count`` wakeups (full queues invert the busier direction).
+    orientation: str = "volume"
 
 
 @dataclass
@@ -103,8 +107,9 @@ class GraphMetadata:
     dropped_event_count: int
     has_end_of_trace: bool
     outside_process_event_count: int
-    # Defaulted so graph.json files written before this field still load.
+    # Defaulted so graph.json files written before these fields still load.
     minimum_source_fraction: float = 0.0
+    orientation: str = "volume"
 
 
 @dataclass
