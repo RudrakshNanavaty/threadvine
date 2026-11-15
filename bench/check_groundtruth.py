@@ -13,6 +13,8 @@ know how many items the run was supposed to have. Pass the settings you used
 for the run to make the check complete:
 
   --items N     items per group (the -n option); catches items missing from the end
+                (checked on the timed items; with -W the profile-phase items are
+                checked only for gaps, because how many there are depends on the time)
   --groups G    number of groups (the -g option)
   --workers W   workers per group (the -w option)
 
@@ -103,13 +105,16 @@ def check(prefix, items=None, groups=None, workers=None):
                 "group": int(r["group"]), "item": int(r["item_id"]),
                 "from": int(r["from_tid"]), "to": int(r["to_tid"]), "stage": r["stage"],
                 "put": int(r["put_ns"]), "get": int(r["get_ns"]),
+                "phase": r.get("phase") or "timed",  # files written before -W existed have no column
             })
+            if parsed[-1]["phase"] not in ("profile", "timed"):
+                errors.append(f"unknown phase '{parsed[-1]['phase']}' in group {r['group']} item {r['item_id']}")
         except (ValueError, KeyError) as e:
             errors.append(f"unreadable row {r}: {e}")
 
     by_item = defaultdict(lambda: defaultdict(list))
     for r in parsed:
-        by_item[(r["group"], r["item"])][r["stage"]].append(r)
+        by_item[(r["group"], r["phase"], r["item"])][r["stage"]].append(r)
         if r["stage"] not in STAGES:
             errors.append(f"unknown stage '{r['stage']}' in group {r['group']} item {r['item']}")
             continue
@@ -124,21 +129,23 @@ def check(prefix, items=None, groups=None, workers=None):
         if r["put"] > r["get"]:
             errors.append(f"group {r['group']} item {r['item']}: taken out before it was put in ({r['stage']})")
 
-    for (g, item), stages in sorted(by_item.items()):
+    for (g, phase, item), stages in sorted(by_item.items()):
+        label = f"item {item}" if phase == "timed" else f"profile item {item}"
         p2w, w2s = stages.get("producer_to_worker", []), stages.get("worker_to_sink", [])
         if len(p2w) != 1 or len(w2s) != 1:
-            errors.append(f"group {g} item {item}: expected 1 handoff per stage, got {len(p2w)} and {len(w2s)}")
+            errors.append(f"group {g} {label}: expected 1 handoff per stage, got {len(p2w)} and {len(w2s)}")
             continue
         a, b = p2w[0], w2s[0]
         if a["to"] != b["from"]:
-            errors.append(f"group {g} item {item}: the worker that received it is not the worker that sent it on")
+            errors.append(f"group {g} {label}: the worker that received it is not the worker that sent it on")
         if a["get"] > b["put"]:
-            errors.append(f"group {g} item {item}: forwarded before it was received")
+            errors.append(f"group {g} {label}: forwarded before it was received")
 
     # ---- are all expected items present? (the case the old check could not see) ----
-    items_by_group = defaultdict(set)
-    for (g, item) in by_item:
-        items_by_group[g].add(item)
+    items_by_group = defaultdict(set)      # timed items
+    profile_by_group = defaultdict(set)    # profile-phase items (only with -W)
+    for (g, phase, item) in by_item:
+        (items_by_group if phase == "timed" else profile_by_group)[g].add(item)
     for g in sorted(expected_groups):
         missing = _missing(items_by_group.get(g, set()), items)
         if missing:
@@ -146,6 +153,12 @@ def check(prefix, items=None, groups=None, workers=None):
         extra = [i for i in items_by_group.get(g, set()) if items is not None and i >= items]
         if extra:
             errors.append(f"group {g}: unexpected item ids {_fmt(sorted(extra))}")
+        gaps = _missing(profile_by_group.get(g, set()))
+        if gaps:
+            errors.append(f"group {g}: profile-phase items missing from the answer key: {_fmt(gaps)}")
+    if profile_by_group:
+        notes.append("profile-phase items per group: " +
+                     ", ".join(f"g{g}={len(v)}" for g, v in sorted(profile_by_group.items())))
     if items is None:
         notes.append("--items was not given, so an item missing from the END of a group cannot be detected")
 

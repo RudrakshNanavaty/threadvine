@@ -11,6 +11,14 @@
 // put it in (from_tid) and who took it out (to_tid). The analyzer never reads
 // these files while inferring relationships; it only uses them for scoring.
 //
+// Profile phase (-W SECONDS): the same threads first run the normal workload for
+// SECONDS (the "profile" phase, which is what the collector traces and the analyzer
+// builds the thread graph from). They then pause and the program waits for SIGUSR1.
+// While it waits you can pin the threads to CPUs. On SIGUSR1 a fresh timed interval
+// starts on the SAME process (same thread ids), and only that interval counts for
+// throughput and latency. Profile-phase handoffs are still written to the answer key
+// (column `phase` = profile); without -W every row has phase = timed.
+//
 // Build:  make bench        (or: gcc -O2 -pthread bench/pipeline.c -o pipeline)
 // Run:    ./pipeline -h
 //
@@ -21,6 +29,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +51,7 @@ static long cfg_cost_us = 5000;  /* work per item in a worker             */
 static int cfg_spin = 0;         /* 0: sleep for the cost, 1: burn CPU    */
 static int cfg_qsize = 8;        /* bounded queue capacity                */
 static int cfg_delay_s = 0;      /* wait before starting (time to attach the collector) */
+static long cfg_profile_s = 0;   /* -W: seconds of profile phase before the timed interval (0 = off) */
 static const char *cfg_prefix = "groundtruth";
 
 /* ---------- small helpers ---------- */
@@ -97,11 +107,19 @@ static void do_work(void)
 }
 
 /* ---------- bounded queue (mutex + two condition variables) ---------- */
+#define KIND_DATA 0      /* a normal item                                          */
+#define KIND_PHASE_END 1 /* end of the profile phase (one per worker, then forwarded) */
+#define KIND_FINAL 2     /* end of the run: a worker that takes it exits           */
+#define PH_PROFILE 0
+#define PH_TIMED 1
+
 typedef struct {
-    int64_t id;        /* item number; -1 = "no more work" marker */
-    int32_t sender_tid;/* thread that put it in the queue         */
-    uint64_t t0_ns;    /* intended arrival time (for latency)     */
-    uint64_t put_ns;   /* when the sender put it in the queue     */
+    int64_t id;        /* item number inside its phase (0, 1, 2, ...)            */
+    int32_t sender_tid;/* thread that put it in the queue                        */
+    int32_t kind;      /* KIND_DATA, KIND_PHASE_END or KIND_FINAL                */
+    int32_t phase;     /* PH_PROFILE or PH_TIMED                                 */
+    uint64_t t0_ns;    /* intended arrival time (for latency)                    */
+    uint64_t put_ns;   /* when the sender put it in the queue                    */
 } Item;
 
 typedef struct {
@@ -154,7 +172,7 @@ static Item queue_get(Queue *q)
 
 /* ---------- ground-truth log (one private buffer per thread: no locking) ---------- */
 typedef struct {
-    int group, stage, from_tid, to_tid;
+    int group, stage, from_tid, to_tid, phase;
     int64_t item;
     uint64_t put_ns, get_ns;
 } Handoff;
@@ -162,6 +180,7 @@ typedef struct {
 typedef struct {
     Handoff *v;
     size_t n, cap;
+    int growable; /* 1 only during the profile phase: the buffer may be reallocated */
 } Log;
 
 static void log_init(Log *l, size_t cap)
@@ -173,15 +192,36 @@ static void log_init(Log *l, size_t cap)
     }
     l->n = 0;
     l->cap = cap;
+    l->growable = 0;
+}
+
+/* Make room for `extra` more handoffs. Only called while no other thread can touch
+ * this log (the threads that own it are idle), so the timed interval never has to
+ * grow a buffer. */
+static void log_reserve(Log *l, size_t extra)
+{
+    if (l->n + extra <= l->cap)
+        return;
+    size_t cap = l->n + extra;
+    Handoff *v = realloc(l->v, cap * sizeof(Handoff));
+    if (!v) {
+        perror("realloc");
+        exit(1);
+    }
+    l->v = v;
+    l->cap = cap;
 }
 
 static void log_add(Log *l, int group, int stage, Item it, int to_tid, uint64_t get_ns)
 {
-    if (l->n >= l->cap) { /* cannot happen: buffers are sized for the worst case */
-        fprintf(stderr, "internal error: ground-truth buffer overflow\n");
-        abort();
+    if (l->n >= l->cap) {
+        if (!l->growable) { /* cannot happen: buffers are sized for the worst case */
+            fprintf(stderr, "internal error: ground-truth buffer overflow\n");
+            abort();
+        }
+        log_reserve(l, l->cap ? l->cap : 1024); /* profile phase only: double it */
     }
-    l->v[l->n++] = (Handoff){ group, stage, it.sender_tid, to_tid, it.id, it.put_ns, get_ns };
+    l->v[l->n++] = (Handoff){ group, stage, it.sender_tid, to_tid, it.phase, it.id, it.put_ns, get_ns };
 }
 
 /* ---------- thread table: tid -> role, so the CSV is readable ---------- */
@@ -214,7 +254,15 @@ static int register_thread(const char *role, int group, int index)
 /* ---------- the threads ---------- */
 typedef struct {
     Queue q1, q2;
+    long profile_items; /* items the producer sent in the profile phase (set before its end markers) */
 } Group;
+
+/* Phase control (used only with -W): sinks report when the profile phase has drained,
+ * main waits for SIGUSR1, then releases the producers for the timed interval. */
+static pthread_mutex_t phase_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t phase_cond = PTHREAD_COND_INITIALIZER;
+static int sinks_profile_done = 0;
+static int timed_go = 0;
 
 typedef struct {
     Group *g;
@@ -241,8 +289,37 @@ static void *producer(void *p)
 {
     ThreadArg *a = p;
     int tid = register_thread("producer", a->group, 0);
-    uint64_t base = now_ns();
+    uint64_t base;
 
+    if (cfg_profile_s > 0) {
+        /* Profile phase: same workload, for cfg_profile_s seconds. */
+        base = now_ns();
+        uint64_t deadline = base + (uint64_t)cfg_profile_s * 1000000000ull;
+        long i;
+        for (i = 0;; i++) {
+            uint64_t due = base + (uint64_t)i * (uint64_t)cfg_period_us * 1000ull;
+            if (cfg_period_us > 0) {
+                if (due >= deadline)
+                    break;
+                sleep_until(due);
+            } else {
+                due = now_ns();
+                if (due >= deadline)
+                    break;
+            }
+            queue_put(&a->g->q1, (Item){ i, tid, KIND_DATA, PH_PROFILE, due, 0 });
+        }
+        __atomic_store_n(&a->g->profile_items, i, __ATOMIC_SEQ_CST);
+        for (int w = 0; w < cfg_workers; w++)
+            queue_put(&a->g->q1, (Item){ -1, tid, KIND_PHASE_END, PH_PROFILE, 0, 0 });
+        /* Wait here until main has seen SIGUSR1. */
+        pthread_mutex_lock(&phase_lock);
+        while (!timed_go)
+            pthread_cond_wait(&phase_cond, &phase_lock);
+        pthread_mutex_unlock(&phase_lock);
+    }
+
+    base = now_ns();
     for (long i = 0; i < cfg_items; i++) {
         uint64_t due = base + (uint64_t)i * (uint64_t)cfg_period_us * 1000ull;
         if (cfg_period_us > 0)
@@ -251,10 +328,10 @@ static void *producer(void *p)
             due = now_ns();
         /* Open loop: latency is measured from when the item was DUE, so a
          * slow pipeline cannot hide its delay by slowing the producer. */
-        queue_put(&a->g->q1, (Item){ i, tid, due, 0 });
+        queue_put(&a->g->q1, (Item){ i, tid, KIND_DATA, PH_TIMED, due, 0 });
     }
     for (int w = 0; w < cfg_workers; w++)       /* one stop marker per worker */
-        queue_put(&a->g->q1, (Item){ -1, tid, 0, 0 });
+        queue_put(&a->g->q1, (Item){ -1, tid, KIND_FINAL, PH_TIMED, 0, 0 });
     return NULL;
 }
 
@@ -266,8 +343,13 @@ static void *worker(void *p)
     for (;;) {
         Item it = queue_get(&a->g->q1);
         uint64_t got = now_ns();
-        if (it.id < 0)
+        if (it.kind == KIND_FINAL)
             break;
+        if (it.kind == KIND_PHASE_END) { /* profile phase over: pass the marker on, keep running */
+            it.sender_tid = tid;
+            queue_put(&a->g->q2, it);
+            continue;
+        }
         log_add(&a->log, a->group, STAGE_P2W, it, tid, got);
         do_work();
         it.sender_tid = tid;
@@ -281,6 +363,28 @@ static void *sink(void *p)
     ThreadArg *a = p;
     int tid = register_thread("sink", a->group, 0);
 
+    if (cfg_profile_s > 0) {
+        /* Profile phase: done when every item the producer sent has arrived AND all
+         * workers' end markers have been seen. Then tell main. */
+        long received = 0;
+        int markers = 0;
+        for (;;) {
+            Item it = queue_get(&a->g->q2);
+            uint64_t got = now_ns();
+            if (it.kind == KIND_PHASE_END)
+                markers++;
+            else {
+                log_add(&a->log, a->group, STAGE_W2S, it, tid, got);
+                received++;
+            }
+            if (markers == cfg_workers && received == __atomic_load_n(&a->g->profile_items, __ATOMIC_SEQ_CST))
+                break;
+        }
+        pthread_mutex_lock(&phase_lock);
+        sinks_profile_done++;
+        pthread_cond_broadcast(&phase_cond);
+        pthread_mutex_unlock(&phase_lock);
+    }
     for (long k = 0; k < cfg_items; k++) {         /* knows how many to expect */
         Item it = queue_get(&a->g->q2);
         uint64_t got = now_ns();
@@ -363,12 +467,13 @@ static int write_files(const Handoff *all, size_t n)
 
     if (open_output(&f, "handoffs", path, sizeof(path)) != 0)
         return -1;
-    fprintf(f, "group,item_id,from_tid,to_tid,stage,put_ns,get_ns\n");
+    fprintf(f, "group,item_id,from_tid,to_tid,stage,put_ns,get_ns,phase\n");
     for (size_t i = 0; i < n; i++)
-        fprintf(f, "%d,%lld,%d,%d,%s,%llu,%llu\n", all[i].group, (long long)all[i].item,
+        fprintf(f, "%d,%lld,%d,%d,%s,%llu,%llu,%s\n", all[i].group, (long long)all[i].item,
                 all[i].from_tid, all[i].to_tid,
                 all[i].stage == STAGE_P2W ? "producer_to_worker" : "worker_to_sink",
-                (unsigned long long)all[i].put_ns, (unsigned long long)all[i].get_ns);
+                (unsigned long long)all[i].put_ns, (unsigned long long)all[i].get_ns,
+                all[i].phase == PH_PROFILE ? "profile" : "timed");
     return close_checked(f, path);
 }
 
@@ -384,6 +489,9 @@ static void usage(const char *prog)
             "  -m MODE  sleep (no CPU used) or spin (burns CPU)   (default sleep)\n"
             "  -q N   queue capacity                      (default %d)\n"
             "  -d S   seconds to wait before starting, so the collector can attach (default 0)\n"
+            "  -W S   run the workload for S seconds as a profile phase, then wait for SIGUSR1\n"
+            "         (kill -USR1 <pid>) and start a fresh timed interval; only that interval\n"
+            "         counts for throughput and latency (default 0 = off)\n"
             "  -o PREFIX  ground-truth file prefix        (default %s)\n"
             "Writes PREFIX.handoffs.csv and PREFIX.threads.csv, prints a summary.\n",
             prog, cfg_workers, cfg_groups, cfg_items, cfg_period_us, cfg_cost_us, cfg_qsize,
@@ -408,7 +516,7 @@ int main(int argc, char **argv)
 {
     int opt;
 
-    while ((opt = getopt(argc, argv, "w:g:n:p:c:m:q:d:o:h")) != -1) {
+    while ((opt = getopt(argc, argv, "w:g:n:p:c:m:q:d:W:o:h")) != -1) {
         switch (opt) {
         case 'w': cfg_workers = (int)parse_long(optarg, 1, "-w"); break;
         case 'g': cfg_groups = (int)parse_long(optarg, 1, "-g"); break;
@@ -417,6 +525,7 @@ int main(int argc, char **argv)
         case 'c': cfg_cost_us = parse_long(optarg, 0, "-c"); break;
         case 'q': cfg_qsize = (int)parse_long(optarg, 1, "-q"); break;
         case 'd': cfg_delay_s = (int)parse_long(optarg, 0, "-d"); break;
+        case 'W': cfg_profile_s = parse_long(optarg, 0, "-W"); break;
         case 'o': cfg_prefix = optarg; break;
         case 'm':
             if (!strcmp(optarg, "spin")) cfg_spin = 1;
@@ -450,6 +559,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    sigset_t usr1;
+    sigemptyset(&usr1);
+    sigaddset(&usr1, SIGUSR1);
+    if (cfg_profile_s > 0) /* block it in every thread; only main waits for it, later */
+        pthread_sigmask(SIG_BLOCK, &usr1, NULL);
+
     int t = 0;
     size_t total_items = (size_t)cfg_groups * (size_t)cfg_items;
     ThreadArg **sinks = calloc((size_t)cfg_groups, sizeof(ThreadArg *));
@@ -470,11 +585,13 @@ int main(int argc, char **argv)
         t++;
         for (int w = 0; w < cfg_workers; w++, t++) {                        /* workers */
             args[t] = (ThreadArg){ .g = &groups[g], .group = g, .index = w };
-            log_init(&args[t].log, (size_t)cfg_items + 1);
+            log_init(&args[t].log, cfg_profile_s > 0 ? 1024 : (size_t)cfg_items + 1);
+            args[t].log.growable = cfg_profile_s > 0;
             workers[nworkers++] = &args[t];
         }
         args[t] = (ThreadArg){ .g = &groups[g], .group = g };               /* sink */
-        log_init(&args[t].log, (size_t)cfg_items);
+        log_init(&args[t].log, cfg_profile_s > 0 ? 1024 : (size_t)cfg_items);
+        args[t].log.growable = cfg_profile_s > 0;
         args[t].lat = calloc((size_t)cfg_items, sizeof(uint64_t));
         if (!args[t].lat) {
             perror("calloc");
@@ -494,13 +611,49 @@ int main(int argc, char **argv)
         spawn(&tids[t], sink, &args[t], "sink");
         t++;
     }
+    if (cfg_profile_s > 0) {
+        /* Wait for the profile phase to drain, then for SIGUSR1. Every thread is now
+         * idle (producers wait for timed_go, workers and sinks wait on empty queues),
+         * so it is safe to size the answer-key buffers for the timed interval here. */
+        pthread_mutex_lock(&phase_lock);
+        while (sinks_profile_done < cfg_groups)
+            pthread_cond_wait(&phase_cond, &phase_lock);
+        pthread_mutex_unlock(&phase_lock);
+
+        size_t profile_total = 0;
+        for (int i = 0; i < nworkers; i++) {
+            profile_total += workers[i]->log.n;
+            log_reserve(&workers[i]->log, (size_t)cfg_items + 1);
+            workers[i]->log.growable = 0;
+        }
+        for (int g = 0; g < cfg_groups; g++) {
+            log_reserve(&sinks[g]->log, (size_t)cfg_items);
+            sinks[g]->log.growable = 0;
+        }
+        printf("profile phase done: %zu producer->worker handoffs recorded\n", profile_total);
+        printf("waiting for SIGUSR1 (kill -USR1 %d)...\n", (int)getpid());
+        fflush(stdout);
+        int sig;
+        sigwait(&usr1, &sig); /* returns at once if SIGUSR1 already arrived */
+        printf("timed interval starting\n");
+        fflush(stdout);
+        pthread_mutex_lock(&phase_lock);
+        start = now_ns();
+        timed_go = 1;
+        pthread_cond_broadcast(&phase_cond);
+        pthread_mutex_unlock(&phase_lock);
+    }
     for (int i = 0; i < nthreads; i++)
         pthread_join(tids[i], NULL);
     uint64_t end = now_ns();
 
     /* Merge logs and latencies. */
-    size_t nall = 0, nlat = 0;
-    Handoff *all = calloc(total_items * 2 + 1, sizeof(Handoff));
+    size_t nall = 0, nlat = 0, all_cap = 1;
+    for (int i = 0; i < nworkers; i++)
+        all_cap += workers[i]->log.n;
+    for (int g = 0; g < cfg_groups; g++)
+        all_cap += sinks[g]->log.n;
+    Handoff *all = calloc(all_cap, sizeof(Handoff));
     uint64_t *lat = calloc(total_items, sizeof(uint64_t));
     if (!all || !lat) {
         perror("calloc");
