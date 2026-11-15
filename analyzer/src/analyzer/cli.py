@@ -30,6 +30,7 @@ from analyzer.graph import (
     write_graph_dot,
     write_graph_json,
 )
+from analyzer.cpu_usage import thread_cpu_shares
 from analyzer.plan import build_plan
 from analyzer.scoring import format_score_report, score_graph, write_scored_graph_dot
 from analyzer.trace import prepare_trace
@@ -221,9 +222,27 @@ def plan(
         int,
         typer.Option(help="Number of CPUs available for placement"),
     ],
+    trace: Annotated[
+        Path | None,
+        typer.Option(
+            help=(
+                "Optional trace the graph came from. With it, threads that use at least "
+                "--hot-share of a CPU are isolated on their own CPUs"
+            ),
+        ),
+    ] = None,
+    hot_share: Annotated[
+        float,
+        typer.Option(help="CPU share (0-1) at which a thread counts as a hog"),
+    ] = 0.5,
 ) -> int:
     """Print a JSON thread-to-CPU plan: one disjoint CPU block per confident group."""
-    placement_plan = build_plan(load_graph_json(str(graph)), cpus)
+    cpu_share_by_thread = (
+        thread_cpu_shares(prepare_trace(str(trace))) if trace is not None else None
+    )
+    placement_plan = build_plan(
+        load_graph_json(str(graph)), cpus, cpu_share_by_thread, hot_share
+    )
     print(json.dumps(placement_plan, indent=2))
     return 0
 
