@@ -36,6 +36,9 @@ class InferenceSettings:
     minimum_fraction: float = DEFAULT_MINIMUM_FRACTION
     # Used only by the timing method (microseconds).
     timing_window_us: int = 100
+    # Opt-in noise filter: an edge must also carry at least this share of its
+    # source thread's outgoing evidence. 0.0 (the default) disables it.
+    minimum_source_fraction: float = 0.0
 
 
 @dataclass
@@ -100,6 +103,8 @@ class GraphMetadata:
     dropped_event_count: int
     has_end_of_trace: bool
     outside_process_event_count: int
+    # Defaulted so graph.json files written before this field still load.
+    minimum_source_fraction: float = 0.0
 
 
 @dataclass
@@ -114,10 +119,15 @@ class Graph:
         """Label edges confident or ambiguous; refresh per-thread evidence totals."""
         # First pass: total incoming evidence per destination (denominator for fraction).
         incoming: dict[int, int] = {}
+        # Same idea per source thread (denominator for the opt-in source share).
+        outgoing: dict[int, int] = {}
         for edge in self.edges:
             count = edge.primary_count(settings.method)
             incoming[edge.destination_thread_id] = (
                 incoming.get(edge.destination_thread_id, 0) + count
+            )
+            outgoing[edge.source_thread_id] = (
+                outgoing.get(edge.source_thread_id, 0) + count
             )
             if edge.source_thread_id not in self.threads:
                 self.threads[edge.source_thread_id] = ThreadSummary(
@@ -132,9 +142,12 @@ class Graph:
             count = edge.primary_count(settings.method)
             destination_total = incoming.get(edge.destination_thread_id, 0)
             fraction = (count / destination_total) if destination_total else 0.0
+            source_total = outgoing.get(edge.source_thread_id, 0)
+            source_fraction = (count / source_total) if source_total else 0.0
             if (
                 count >= settings.minimum_count
                 and fraction >= settings.minimum_fraction
+                and source_fraction >= settings.minimum_source_fraction
             ):
                 edge.confidence = "confident"
             else:

@@ -93,13 +93,16 @@ def method_label(method: str, timing_window_us: int | None) -> str:
 def run_comparison(
     rows: list[ManifestRow],
     timing_windows_us: list[int],
+    minimum_source_fraction: float = 0.0,
 ) -> list[RunResult]:
     """Score wakeup plus the timing method at each window, for every manifest row."""
     results: list[RunResult] = []
     for row in rows:
         loaded_trace = prepare_trace(row.trace_path)
 
-        wakeup_settings = InferenceSettings(method="wakeup")
+        wakeup_settings = InferenceSettings(
+            method="wakeup", minimum_source_fraction=minimum_source_fraction
+        )
         wakeup_graph = wakeup_inference.infer(loaded_trace, wakeup_settings)
         results.append(
             RunResult(
@@ -114,7 +117,9 @@ def run_comparison(
 
         for timing_window_us in timing_windows_us:
             timing_settings = InferenceSettings(
-                method="timing", timing_window_us=timing_window_us
+                method="timing",
+                timing_window_us=timing_window_us,
+                minimum_source_fraction=minimum_source_fraction,
             )
             timing_graph = timing_inference.infer(loaded_trace, timing_settings)
             results.append(

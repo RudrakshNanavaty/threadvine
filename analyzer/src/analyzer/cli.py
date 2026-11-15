@@ -80,6 +80,15 @@ def infer(
             ),
         ),
     ] = DEFAULT_MINIMUM_FRACTION,
+    minimum_source_fraction: Annotated[
+        float,
+        typer.Option(
+            help=(
+                "Opt-in noise filter: minimum share of the source thread's "
+                "outgoing evidence (default 0 = off)"
+            ),
+        ),
+    ] = 0.0,
     timing_window_us: Annotated[
         int,
         typer.Option(
@@ -95,6 +104,7 @@ def infer(
         minimum_count=minimum_count,
         minimum_fraction=minimum_fraction,
         timing_window_us=timing_window_us,
+        minimum_source_fraction=minimum_source_fraction,
     )
     prepared_trace = prepare_trace(str(trace))
     if method == "wakeup":
@@ -180,6 +190,15 @@ def compare(
             ),
         ),
     ] = None,
+    minimum_source_fraction: Annotated[
+        float,
+        typer.Option(
+            help=(
+                "Opt-in noise filter: minimum share of the source thread's "
+                "outgoing evidence (default 0 = off)"
+            ),
+        ),
+    ] = 0.0,
     csv_path: Annotated[
         Path | None,
         typer.Option("--csv", help="Write the per-run rows to this CSV file"),
@@ -196,7 +215,9 @@ def compare(
         window_list = [timing_window_us]
     else:
         window_list = [int(part) for part in timing_windows.split(",") if part.strip()]
-    results = run_comparison(read_manifest(str(manifest)), window_list)
+    results = run_comparison(
+        read_manifest(str(manifest)), window_list, minimum_source_fraction
+    )
     print(format_comparison_table(results))
     if csv_path is not None:
         write_results_csv(results, str(csv_path))
