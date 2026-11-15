@@ -89,6 +89,15 @@ def infer(
             ),
         ),
     ] = 0.0,
+    orientation: Annotated[
+        Literal["volume", "first-wakeup"],
+        typer.Option(
+            help=(
+                "Wakeup method arrow rule: busier direction (default) or the "
+                "direction that woke first (opt-in; for saturated queues)"
+            ),
+        ),
+    ] = "volume",
     timing_window_us: Annotated[
         int,
         typer.Option(
@@ -105,6 +114,7 @@ def infer(
         minimum_fraction=minimum_fraction,
         timing_window_us=timing_window_us,
         minimum_source_fraction=minimum_source_fraction,
+        orientation=orientation,
     )
     prepared_trace = prepare_trace(str(trace))
     if method == "wakeup":
@@ -199,6 +209,15 @@ def compare(
             ),
         ),
     ] = 0.0,
+    orientation: Annotated[
+        Literal["volume", "first-wakeup"],
+        typer.Option(
+            help=(
+                "Wakeup method arrow rule: busier direction (default) or the "
+                "direction that woke first (opt-in; for saturated queues)"
+            ),
+        ),
+    ] = "volume",
     csv_path: Annotated[
         Path | None,
         typer.Option("--csv", help="Write the per-run rows to this CSV file"),
@@ -216,7 +235,7 @@ def compare(
     else:
         window_list = [int(part) for part in timing_windows.split(",") if part.strip()]
     results = run_comparison(
-        read_manifest(str(manifest)), window_list, minimum_source_fraction
+        read_manifest(str(manifest)), window_list, minimum_source_fraction, orientation
     )
     print(format_comparison_table(results))
     if csv_path is not None:
