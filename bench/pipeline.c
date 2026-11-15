@@ -52,6 +52,7 @@ static int cfg_spin = 0;         /* 0: sleep for the cost, 1: burn CPU    */
 static int cfg_qsize = 8;        /* bounded queue capacity                */
 static int cfg_delay_s = 0;      /* wait before starting (time to attach the collector) */
 static long cfg_profile_s = 0;   /* -W: seconds of profile phase before the timed interval (0 = off) */
+static int cfg_hogs = 0;         /* -H: extra CPU-burning threads outside any pipeline (default 0) */
 static const char *cfg_prefix = "groundtruth";
 
 /* ---------- small helpers ---------- */
@@ -285,6 +286,38 @@ static void spawn(pthread_t *thread, void *(*fn)(void *), ThreadArg *a, const ch
     }
 }
 
+/* Background CPU hog (-H): burns a CPU until told to stop and counts how much it did, so
+ * an experiment can check that moving it does not just starve it. It is deliberately NOT
+ * registered in the thread table: it is not part of any pipeline, so the answer key and
+ * check_groundtruth.py are unchanged. */
+static int hogs_stop = 0;
+typedef struct {
+    uint64_t blocks; /* finished blocks of busy work */
+    char pad[56];    /* one counter per cache line, so hogs do not slow each other down */
+} HogCounter;
+static HogCounter *hog_counters;
+
+static uint64_t hog_total(void)
+{
+    uint64_t total = 0;
+    for (int h = 0; h < cfg_hogs; h++)
+        total += __atomic_load_n(&hog_counters[h].blocks, __ATOMIC_RELAXED);
+    return total;
+}
+
+static void *hog(void *p)
+{
+    HogCounter *counter = p;
+
+    pthread_setname_np(pthread_self(), "hog");
+    while (!__atomic_load_n(&hogs_stop, __ATOMIC_RELAXED)) {
+        for (volatile int k = 0; k < 20000; k++)
+            ;
+        __atomic_fetch_add(&counter->blocks, 1, __ATOMIC_RELAXED);
+    }
+    return NULL;
+}
+
 static void *producer(void *p)
 {
     ThreadArg *a = p;
@@ -492,6 +525,8 @@ static void usage(const char *prog)
             "  -W S   run the workload for S seconds as a profile phase, then wait for SIGUSR1\n"
             "         (kill -USR1 <pid>) and start a fresh timed interval; only that interval\n"
             "         counts for throughput and latency (default 0 = off)\n"
+            "  -H N   extra CPU-hog threads outside the pipelines (default 0); prints\n"
+            "         hog_iterations_per_s so you can check a placement does not starve them\n"
             "  -o PREFIX  ground-truth file prefix        (default %s)\n"
             "Writes PREFIX.handoffs.csv and PREFIX.threads.csv, prints a summary.\n",
             prog, cfg_workers, cfg_groups, cfg_items, cfg_period_us, cfg_cost_us, cfg_qsize,
@@ -516,7 +551,7 @@ int main(int argc, char **argv)
 {
     int opt;
 
-    while ((opt = getopt(argc, argv, "w:g:n:p:c:m:q:d:W:o:h")) != -1) {
+    while ((opt = getopt(argc, argv, "w:g:n:p:c:m:q:d:W:H:o:h")) != -1) {
         switch (opt) {
         case 'w': cfg_workers = (int)parse_long(optarg, 1, "-w"); break;
         case 'g': cfg_groups = (int)parse_long(optarg, 1, "-g"); break;
@@ -526,6 +561,7 @@ int main(int argc, char **argv)
         case 'q': cfg_qsize = (int)parse_long(optarg, 1, "-q"); break;
         case 'd': cfg_delay_s = (int)parse_long(optarg, 0, "-d"); break;
         case 'W': cfg_profile_s = parse_long(optarg, 0, "-W"); break;
+        case 'H': cfg_hogs = (int)parse_long(optarg, 0, "-H"); break;
         case 'o': cfg_prefix = optarg; break;
         case 'm':
             if (!strcmp(optarg, "spin")) cfg_spin = 1;
@@ -535,7 +571,7 @@ int main(int argc, char **argv)
         default: usage(argv[0]); return opt == 'h' ? 0 : 1;
         }
     }
-    if (cfg_groups * (cfg_workers + 2) + 1 > MAX_THREADS) {
+    if (cfg_groups * (cfg_workers + 2) + 1 + cfg_hogs > MAX_THREADS) {
         fprintf(stderr, "too many threads (limit %d)\n", MAX_THREADS);
         return 1;
     }
@@ -564,6 +600,16 @@ int main(int argc, char **argv)
     sigaddset(&usr1, SIGUSR1);
     if (cfg_profile_s > 0) /* block it in every thread; only main waits for it, later */
         pthread_sigmask(SIG_BLOCK, &usr1, NULL);
+
+    pthread_t *hog_threads = NULL;
+    if (cfg_hogs > 0) {
+        hog_threads = calloc((size_t)cfg_hogs, sizeof(pthread_t));
+        hog_counters = calloc((size_t)cfg_hogs, sizeof(HogCounter));
+        if (!hog_threads || !hog_counters) {
+            perror("calloc");
+            return 1;
+        }
+    }
 
     int t = 0;
     size_t total_items = (size_t)cfg_groups * (size_t)cfg_items;
@@ -611,6 +657,14 @@ int main(int argc, char **argv)
         spawn(&tids[t], sink, &args[t], "sink");
         t++;
     }
+    for (int h = 0; h < cfg_hogs; h++) {
+        int rc = pthread_create(&hog_threads[h], NULL, hog, &hog_counters[h]);
+        if (rc != 0) {
+            fprintf(stderr, "error: cannot create hog thread: %s\n", strerror(rc));
+            exit(1);
+        }
+    }
+    uint64_t hog_blocks_at_start = 0; /* hog work done before the timed interval starts */
     if (cfg_profile_s > 0) {
         /* Wait for the profile phase to drain, then for SIGUSR1. Every thread is now
          * idle (producers wait for timed_go, workers and sinks wait on empty queues),
@@ -637,6 +691,7 @@ int main(int argc, char **argv)
         sigwait(&usr1, &sig); /* returns at once if SIGUSR1 already arrived */
         printf("timed interval starting\n");
         fflush(stdout);
+        hog_blocks_at_start = hog_total();
         pthread_mutex_lock(&phase_lock);
         start = now_ns();
         timed_go = 1;
@@ -646,6 +701,10 @@ int main(int argc, char **argv)
     for (int i = 0; i < nthreads; i++)
         pthread_join(tids[i], NULL);
     uint64_t end = now_ns();
+    uint64_t hog_blocks_in_interval = hog_total() - hog_blocks_at_start;
+    __atomic_store_n(&hogs_stop, 1, __ATOMIC_RELAXED);
+    for (int h = 0; h < cfg_hogs; h++)
+        pthread_join(hog_threads[h], NULL);
 
     /* Merge logs and latencies. */
     size_t nall = 0, nlat = 0, all_cap = 1;
@@ -684,6 +743,8 @@ int main(int argc, char **argv)
     if (nlat)
         printf("latency_ms p50=%.2f p95=%.2f p99=%.2f max=%.2f\n", pct_ms(lat, nlat, 0.50),
                pct_ms(lat, nlat, 0.95), pct_ms(lat, nlat, 0.99), pct_ms(lat, nlat, 1.0));
+    if (cfg_hogs > 0)
+        printf("hogs=%d hog_iterations_per_s=%.1f\n", cfg_hogs, (double)hog_blocks_in_interval / secs);
     if (write_status != 0) {
         fprintf(stderr, "error: ground-truth files were not written correctly; this run is not valid\n");
         return 1;

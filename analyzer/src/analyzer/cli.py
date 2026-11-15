@@ -30,6 +30,7 @@ from analyzer.graph import (
     write_graph_dot,
     write_graph_json,
 )
+from analyzer.cpu_usage import thread_cpu_shares
 from analyzer.plan import build_plan
 from analyzer.scoring import format_score_report, score_graph, write_scored_graph_dot
 from analyzer.trace import prepare_trace
@@ -80,6 +81,24 @@ def infer(
             ),
         ),
     ] = DEFAULT_MINIMUM_FRACTION,
+    minimum_source_fraction: Annotated[
+        float,
+        typer.Option(
+            help=(
+                "Opt-in noise filter: minimum share of the source thread's "
+                "outgoing evidence (default 0 = off)"
+            ),
+        ),
+    ] = 0.0,
+    orientation: Annotated[
+        Literal["volume", "first-wakeup"],
+        typer.Option(
+            help=(
+                "Wakeup method arrow rule: busier direction (default) or the "
+                "direction that woke first (opt-in; for saturated queues)"
+            ),
+        ),
+    ] = "volume",
     timing_window_us: Annotated[
         int,
         typer.Option(
@@ -95,6 +114,8 @@ def infer(
         minimum_count=minimum_count,
         minimum_fraction=minimum_fraction,
         timing_window_us=timing_window_us,
+        minimum_source_fraction=minimum_source_fraction,
+        orientation=orientation,
     )
     prepared_trace = prepare_trace(str(trace))
     if method == "wakeup":
@@ -180,6 +201,24 @@ def compare(
             ),
         ),
     ] = None,
+    minimum_source_fraction: Annotated[
+        float,
+        typer.Option(
+            help=(
+                "Opt-in noise filter: minimum share of the source thread's "
+                "outgoing evidence (default 0 = off)"
+            ),
+        ),
+    ] = 0.0,
+    orientation: Annotated[
+        Literal["volume", "first-wakeup"],
+        typer.Option(
+            help=(
+                "Wakeup method arrow rule: busier direction (default) or the "
+                "direction that woke first (opt-in; for saturated queues)"
+            ),
+        ),
+    ] = "volume",
     csv_path: Annotated[
         Path | None,
         typer.Option("--csv", help="Write the per-run rows to this CSV file"),
@@ -196,7 +235,9 @@ def compare(
         window_list = [timing_window_us]
     else:
         window_list = [int(part) for part in timing_windows.split(",") if part.strip()]
-    results = run_comparison(read_manifest(str(manifest)), window_list)
+    results = run_comparison(
+        read_manifest(str(manifest)), window_list, minimum_source_fraction, orientation
+    )
     print(format_comparison_table(results))
     if csv_path is not None:
         write_results_csv(results, str(csv_path))
@@ -221,9 +262,27 @@ def plan(
         int,
         typer.Option(help="Number of CPUs available for placement"),
     ],
+    trace: Annotated[
+        Path | None,
+        typer.Option(
+            help=(
+                "Optional trace the graph came from. With it, threads that use at least "
+                "--hot-share of a CPU are isolated on their own CPUs"
+            ),
+        ),
+    ] = None,
+    hot_share: Annotated[
+        float,
+        typer.Option(help="CPU share (0-1) at which a thread counts as a hog"),
+    ] = 0.5,
 ) -> int:
     """Print a JSON thread-to-CPU plan: one disjoint CPU block per confident group."""
-    placement_plan = build_plan(load_graph_json(str(graph)), cpus)
+    cpu_share_by_thread = (
+        thread_cpu_shares(prepare_trace(str(trace))) if trace is not None else None
+    )
+    placement_plan = build_plan(
+        load_graph_json(str(graph)), cpus, cpu_share_by_thread, hot_share
+    )
     print(json.dumps(placement_plan, indent=2))
     return 0
 

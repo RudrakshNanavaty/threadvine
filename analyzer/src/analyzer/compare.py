@@ -38,6 +38,8 @@ CSV_COLUMNS = [
     "ambiguous_edges",
     "directed_precision",
     "directed_recall",
+    "undirected_precision",
+    "undirected_recall",
     "false_positives",
     "missed_edges",
     "cross_group_confident_edges",
@@ -93,13 +95,19 @@ def method_label(method: str, timing_window_us: int | None) -> str:
 def run_comparison(
     rows: list[ManifestRow],
     timing_windows_us: list[int],
+    minimum_source_fraction: float = 0.0,
+    orientation: str = "volume",
 ) -> list[RunResult]:
     """Score wakeup plus the timing method at each window, for every manifest row."""
     results: list[RunResult] = []
     for row in rows:
         loaded_trace = prepare_trace(row.trace_path)
 
-        wakeup_settings = InferenceSettings(method="wakeup")
+        wakeup_settings = InferenceSettings(
+            method="wakeup",
+            minimum_source_fraction=minimum_source_fraction,
+            orientation=orientation,
+        )
         wakeup_graph = wakeup_inference.infer(loaded_trace, wakeup_settings)
         results.append(
             RunResult(
@@ -114,7 +122,9 @@ def run_comparison(
 
         for timing_window_us in timing_windows_us:
             timing_settings = InferenceSettings(
-                method="timing", timing_window_us=timing_window_us
+                method="timing",
+                timing_window_us=timing_window_us,
+                minimum_source_fraction=minimum_source_fraction,
             )
             timing_graph = timing_inference.infer(loaded_trace, timing_settings)
             results.append(
@@ -152,6 +162,8 @@ def write_results_csv(results: list[RunResult], path: str) -> None:
                     report.ambiguous_edge_count,
                     _csv_ratio(report.directed_precision),
                     _csv_ratio(report.directed_recall),
+                    _csv_ratio(report.undirected_precision),
+                    _csv_ratio(report.undirected_recall),
                     report.directed_false_positives,
                     report.directed_false_negatives,
                     report.cross_group_confident_edge_count,
@@ -190,6 +202,8 @@ def format_comparison_table(results: list[RunResult]) -> str:
         "runs",
         "directed precision",
         "directed recall",
+        "undirected precision",
+        "undirected recall",
         "false positives",
         "missed edges",
         "cross-group confident",
@@ -207,6 +221,8 @@ def format_comparison_table(results: list[RunResult]) -> str:
             str(len(group)),
             _summarize([report.directed_precision for report in reports], True),
             _summarize([report.directed_recall for report in reports], True),
+            _summarize([report.undirected_precision for report in reports], True),
+            _summarize([report.undirected_recall for report in reports], True),
             _summarize([report.directed_false_positives for report in reports], False),
             _summarize([report.directed_false_negatives for report in reports], False),
             _summarize(

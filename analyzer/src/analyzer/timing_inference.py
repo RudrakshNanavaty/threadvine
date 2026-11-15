@@ -117,6 +117,7 @@ def infer(trace: Trace, settings: InferenceSettings) -> Graph:
             dropped_event_count=trace.dropped_event_count,
             has_end_of_trace=trace.has_end_of_trace,
             outside_process_event_count=trace.outside_process_event_count,
+            minimum_source_fraction=settings.minimum_source_fraction,
         ),
         threads=threads,
         edges=edges,
