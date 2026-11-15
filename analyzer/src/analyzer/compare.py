@@ -94,6 +94,7 @@ def run_comparison(
     rows: list[ManifestRow],
     timing_windows_us: list[int],
     minimum_source_fraction: float = 0.0,
+    orientation: str = "volume",
 ) -> list[RunResult]:
     """Score wakeup plus the timing method at each window, for every manifest row."""
     results: list[RunResult] = []
@@ -101,7 +102,9 @@ def run_comparison(
         loaded_trace = prepare_trace(row.trace_path)
 
         wakeup_settings = InferenceSettings(
-            method="wakeup", minimum_source_fraction=minimum_source_fraction
+            method="wakeup",
+            minimum_source_fraction=minimum_source_fraction,
+            orientation=orientation,
         )
         wakeup_graph = wakeup_inference.infer(loaded_trace, wakeup_settings)
         results.append(
