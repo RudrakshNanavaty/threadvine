@@ -84,3 +84,18 @@ Check the result with `taskset -cp <tid>`.
     kill -USR1 <pid>                                                  # starts the timed interval
 
 The profile items are in the answer key (column `phase`), so the graph built from the profile can still be scored. Details: `docs/ground-truth-format.md`.
+
+cat >> docs/experiments.md <<'EOF'
+
+
+## Collector overhead on the ping-pong stress test (Part A)
+
+`experiments/pingpong_overhead.py` measures the worst case: `bpf/tests/pingpong.c` makes two threads hand a turn back and forth as fast as they can, about 270,000 events per second on the VCL VM. Each repeat runs `untraced`, `binary` (`collector --output`) and `text` (one printed line per event, sent to a file) once, in a rotating order.
+
+    make bpf && sudo -v
+    python3 experiments/pingpong_overhead.py --rounds 200000 --repeats 5
+
+Throughput is rounds per second from start to exit. A traced run is `valid=yes` only if the collector exited 0, was attached before the first round, and dropped no events. The summary reports overhead against the untraced mean and the run-to-run spread; an overhead smaller than the spread is noise.
+
+First result (4-vCPU VCL VM, 5 repeats): binary 8.9% throughput loss, text 10.4%, spread about 9%, 0 of about 11.6M events dropped. That is about 0.33 µs per event, so overhead grows with the event rate.
+EOF
