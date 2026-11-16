@@ -1,0 +1,33 @@
+digraph wakeup {
+  rankdir=LR;
+  bgcolor="white";
+  nodesep=0.5; ranksep=1.1;
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=14, penwidth=1.5];
+  edge [fontname="Helvetica", fontsize=12, color="#444444", penwidth=1.8];
+  labelloc=t; fontname="Helvetica-Bold"; fontsize=18;
+  label="Thread wakeup graph inferred from kernel sched_waking events\nedge A → B = A woke B, label = wakeup count";
+
+  subgraph cluster_1 {
+    label="Group 1"; style="rounded,dashed"; color="#999999"; fontname="Helvetica"; fontsize=13;
+    a_src [label="producer\n(233853)", fillcolor="#dbeafe"];
+    a_w1  [label="worker 1\n(233854)", fillcolor="#fef3c7"];
+    a_w2  [label="worker 2\n(233855)", fillcolor="#fef3c7"];
+    a_snk [label="sink\n(233856)", fillcolor="#dcfce7"];
+  }
+  subgraph cluster_2 {
+    label="Group 2"; style="rounded,dashed"; color="#999999"; fontname="Helvetica"; fontsize=13;
+    b_src [label="producer\n(233857)", fillcolor="#dbeafe"];
+    b_w1  [label="worker 1\n(233858)", fillcolor="#fef3c7"];
+    b_w2  [label="worker 2\n(233859)", fillcolor="#fef3c7"];
+    b_snk [label="sink\n(233860)", fillcolor="#dcfce7"];
+  }
+
+  a_src -> a_w1  [label="20"];
+  a_src -> a_w2  [label="20"];
+  a_w1  -> a_snk [label="22"];
+  a_w2  -> a_snk [label="19"];
+  b_src -> b_w1  [label="20"];
+  b_src -> b_w2  [label="20"];
+  b_w1  -> b_snk [label="20"];
+  b_w2  -> b_snk [label="20"];
+}
